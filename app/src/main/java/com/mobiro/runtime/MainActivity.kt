@@ -74,9 +74,10 @@ class MainActivity : GameActivity() {
     }
 
     private fun startNativeContainer(gameDir: String) {
+        val saveDir = File(filesDir, "saves_overlay").apply { mkdirs() }.absolutePath
         val cacheDir = File(cacheDir, "runtime_cache").apply { mkdirs() }.absolutePath
         val nativeLibDir = applicationInfo.nativeLibraryDir
-        val err = nativeConfigureAndValidate(gameDir, cacheDir, nativeLibDir)
+        val err = nativeConfigureAndValidate(gameDir, saveDir, cacheDir, nativeLibDir)
         if (err.isNotEmpty()) {
             Log.e(TAG, "BYOF validation failed: $err")
             Toast.makeText(this, "Validation failed: $err", Toast.LENGTH_LONG).show()
@@ -113,6 +114,7 @@ class MainActivity : GameActivity() {
 
     private external fun nativeConfigureAndValidate(
         gameDir: String,
+        saveDir: String,
         cacheDir: String,
         nativeLibDir: String
     ): String

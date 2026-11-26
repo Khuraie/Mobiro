@@ -5,8 +5,10 @@
 #include "cpu_mem/win64_teb.hpp"
 #include "gfx/dxvk_config_gen.hpp"
 #include "gfx/dxvk_interop.hpp"
+#include "gfx/pipeline_cache_warmer.hpp"
 #include "gfx/turnip_loader.hpp"
 #include "input/input_router.hpp"
+#include "input/touch_controller.hpp"
 #include "sched/thread_balancer.hpp"
 #include "validator/archive_probe.hpp"
 #include "validator/vfs_mapper.hpp"
@@ -32,6 +34,8 @@ struct MobiroRuntimeState {
     mobiro::cpu::LoadedPeImage pe_image;
     mobiro::cpu::Win64ThreadEnv main_thread_env;
     mobiro::gfx::VulkanDriverHandle vk_driver;
+    mobiro::gfx::PipelineCacheWarmer cache_warmer;
+    mobiro::input::TouchController touch_ctrl;
     mobiro::sched::ThreadBalancer balancer;
     std::atomic<int> target_fps{60};
     std::atomic<bool> configured{false};
@@ -82,6 +86,34 @@ void process_game_activity_input(android_app* app) {
             router.set_left_stick(lx, ly);
             router.set_right_stick(rx, ry);
             router.set_triggers(lt, rt);
+        } else if ((ev.source & AINPUT_SOURCE_TOUCHSCREEN) == AINPUT_SOURCE_TOUCHSCREEN && ev.pointerCount > 0) {
+            const int32_t masked = ev.action & AMOTION_EVENT_ACTION_MASK;
+            const int32_t idx = (ev.action & AMOTION_EVENT_ACTION_POINTER_INDEX_MASK)
+                                >> AMOTION_EVENT_ACTION_POINTER_INDEX_SHIFT;
+            if (masked == AMOTION_EVENT_ACTION_DOWN || masked == AMOTION_EVENT_ACTION_POINTER_DOWN) {
+                if (idx >= 0 && static_cast<uint32_t>(idx) < ev.pointerCount) {
+                    const auto& p = ev.pointers[idx];
+                    g_rt.touch_ctrl.on_pointer(
+                        p.id, mobiro::input::TouchAction::Down,
+                        GameActivityPointerAxes_getX(&p), GameActivityPointerAxes_getY(&p), router);
+                }
+            } else if (masked == AMOTION_EVENT_ACTION_UP || masked == AMOTION_EVENT_ACTION_POINTER_UP) {
+                if (idx >= 0 && static_cast<uint32_t>(idx) < ev.pointerCount) {
+                    const auto& p = ev.pointers[idx];
+                    g_rt.touch_ctrl.on_pointer(
+                        p.id, mobiro::input::TouchAction::Up,
+                        GameActivityPointerAxes_getX(&p), GameActivityPointerAxes_getY(&p), router);
+                }
+            } else if (masked == AMOTION_EVENT_ACTION_MOVE) {
+                for (uint32_t k = 0; k < ev.pointerCount; ++k) {
+                    const auto& p = ev.pointers[k];
+                    g_rt.touch_ctrl.on_pointer(
+                        p.id, mobiro::input::TouchAction::Move,
+                        GameActivityPointerAxes_getX(&p), GameActivityPointerAxes_getY(&p), router);
+                }
+            } else if (masked == AMOTION_EVENT_ACTION_CANCEL) {
+                g_rt.touch_ctrl.on_pointer(0, mobiro::input::TouchAction::Cancel, 0.0f, 0.0f, router);
+            }
         }
     }
 
@@ -93,16 +125,19 @@ void process_game_activity_input(android_app* app) {
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_mobiro_runtime_MainActivity_nativeConfigureAndValidate(
-    JNIEnv* env, jobject /*thiz*/, jstring jGameDir, jstring jCacheDir, jstring jNativeLibDir) {
-    const char* c_game = env->GetStringUTFChars(jGameDir, nullptr);
+    JNIEnv* env, jobject /*thiz*/, jstring jGameDir, jstring jSaveDir, jstring jCacheDir, jstring jNativeLibDir) {
+    const char* c_game  = env->GetStringUTFChars(jGameDir, nullptr);
+    const char* c_save  = env->GetStringUTFChars(jSaveDir, nullptr);
     const char* c_cache = env->GetStringUTFChars(jCacheDir, nullptr);
-    const char* c_libs = env->GetStringUTFChars(jNativeLibDir, nullptr);
+    const char* c_libs  = env->GetStringUTFChars(jNativeLibDir, nullptr);
 
-    std::string game_dir = c_game ? c_game : "";
+    std::string game_dir  = c_game  ? c_game  : "";
+    std::string save_dir  = c_save  ? c_save  : "";
     std::string cache_dir = c_cache ? c_cache : "";
-    std::string lib_dir = c_libs ? c_libs : "";
+    std::string lib_dir   = c_libs  ? c_libs  : "";
 
     env->ReleaseStringUTFChars(jGameDir, c_game);
+    env->ReleaseStringUTFChars(jSaveDir, c_save);
     env->ReleaseStringUTFChars(jCacheDir, c_cache);
     env->ReleaseStringUTFChars(jNativeLibDir, c_libs);
 
@@ -116,12 +151,13 @@ Java_com_mobiro_runtime_MainActivity_nativeConfigureAndValidate(
     g_rt.balancer.initialize(16'666'666);
     g_rt.balancer.bind_current_thread(mobiro::sched::ThreadRole::MainSimPhysics);
 
-    // 3. Configure writable save overlay + per-build shader/pipeline cache + dynamic dxvk.conf
-    g_rt.vfs.set_write_overlay(cache_dir + "/saves_overlay");
+    // 3. Configure persistent writable save overlay + per-build shader/pipeline cache + dynamic dxvk.conf
+    g_rt.vfs.set_write_overlay(save_dir);
     const std::string build_cache = cache_dir + "/" + report.pe.build_fingerprint;
     std::error_code ec;
     std::filesystem::create_directories(build_cache + "/turnip", ec);
     std::filesystem::create_directories(build_cache + "/dxvk", ec);
+    g_rt.cache_warmer.start_async_warm(cache_dir, report.pe.build_fingerprint, &g_rt.balancer);
 
     const std::string dxvk_conf_path = build_cache + "/dxvk.conf";
     mobiro::gfx::DxvkProfileParams params{
@@ -211,6 +247,7 @@ void handle_app_cmd(android_app* app, int32_t cmd) {
             if (app->window) {
                 mobiro::gfx::DxvkInterop::global().set_native_window(app->window);
                 auto s = mobiro::gfx::DxvkInterop::global().surface();
+                g_rt.touch_ctrl.set_viewport(static_cast<float>(s.width), static_cast<float>(s.height));
                 __android_log_print(ANDROID_LOG_INFO, kLogTag,
                                     "ANativeWindow bound: %dx%d (gen=%llu)",
                                     s.width, s.height,
@@ -237,6 +274,7 @@ extern "C" void android_main(struct android_app* app) {
         }
         process_game_activity_input(app);
     }
+    g_rt.cache_warmer.wait();
     g_rt.box64.shutdown();
     mobiro::audio::AAudioXAudioBridge::global().stop();
     mobiro::gfx::DxvkInterop::global().unload();

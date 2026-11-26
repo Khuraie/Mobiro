@@ -71,7 +71,8 @@ See [PROGRESS.md](PROGRESS.md) for the live engineering log of every verified in
 - [x] **M1-b — Guest Executor, SEH `.pdata` Registry, Win32 Heap/Events & Box64 Build Pipeline:** Implemented `GuestExecutor` (`GS`/TEB + Win64 stack setup + x86_64 IAT dispatch verification), `.pdata` `RtlLookupFunctionEntry` binary search, `GuestHeap` (`HeapAlloc`/`ReAlloc`/`Free`), `EventTable` (`WaitForSingleObject`), and `scripts/build_box64_android.sh`.
 - [x] **M2 — Native AArch64 DXVK + Turnip Interop & Build Pipeline:** Implemented `DxvkInterop` (`ANativeWindow` lifecycle + `30/60 FPS` pacing + `dlopen` native DXVK loader), full MS-x64 10/12-arg `D3D11CreateDevice`/`D3D11CreateDeviceAndSwapChain`/`CreateDXGIFactory1` marshaling, and Meson cross-build scripts (`scripts/build_turnip_android.sh`, `scripts/build_dxvk_android.sh`).
 - [x] **M3 — Win32 Save Overlay, `CreateThread`/`WaitOnAddress` & `AAudio` Bridge:** Copy-on-write save-game VFS overlay (`WriteFile`/`FlushFileBuffers`), `CreateThread` with per-thread TEB + `ThreadBalancer` binding, `WaitOnAddress`/`WakeByAddress`, and `XAudio2Create` → lock-free `AAudio` stereo PCM bridge.
-- [ ] **M4 — In-Swapchain Touch HUD & Frame-Pacing Tuning:** Render virtual controls inside the Vulkan swapchain pass and tune GPL pipeline pre-warming for stable 30/60 FPS combat pacing.
+- [x] **M4 — Multi-Touch XInput Controller, HUD Quads & Pipeline Cache Pre-Warmer:** Zero-debounce Sekiro combat multi-touch controller (`TouchController`), in-swapchain `HudQuad` geometry generator, persistent `filesDir/saves_overlay` separation, and Efficiency-core `PipelineCacheWarmer` with stale cache pruning.
+- [ ] **M5 — Real-Device Bring-Up (Upstream Binary Integration):** Package source-built `arm64-v8a` Box64 + Mesa Turnip + native DXVK (`ANativeWindow` WSI) + `IXAudio2` COM voice vtables and test on Adreno 7xx/8xx hardware.
 
 ---
 

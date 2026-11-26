@@ -6,7 +6,19 @@
 
 ## Log Entries
 
+### Increment 6 — M4: Persistent Save Storage, Multi-Touch XInput Controller + HUD Quads & Pipeline Cache Pre-Warmer (2026-11-27)
+- **Status:** Implemented & verified (local MSVC 2022 + GitHub Actions Linux GCC & Android ARM64 NDK)
+- **Changes:**
+  - Separated persistent `filesDir/saves_overlay` from `cacheDir` across `MainActivity.kt` and `runtime_main.cpp` so Android's cache eviction never deletes Sekiro save games.
+  - Implemented `TouchController` (`app/src/main/cpp/input/touch_controller.hpp`): zero-debounce landscape Sekiro combat layout (`L1` Deflect, `R1` Attack, `B` Dodge/Mikiri, `A` Jump, `L2`/`R2`, `R3` Lock-On), left-half floating movement thumbstick, right-half relative camera look, and flat screen-space `HudQuad` geometry generation for single-draw in-swapchain Vulkan rendering.
+  - Wired `AINPUT_SOURCE_TOUCHSCREEN` multi-touch pointer events and `ANativeWindow` viewport dimensions into `runtime_main.cpp`.
+  - Implemented `PipelineCacheWarmer` (`app/src/main/cpp/gfx/pipeline_cache_warmer.hpp`) running on Efficiency cores to prune stale build cache directories and pre-read active DXVK/Turnip cache files into the OS page cache at startup.
+  - Added `test_touch_controller_and_cache_warmer` in `tests/test_core.cpp`.
+
+---
+
 ### Increment 5 — M3: Writable Save-Game VFS Overlay, `CreateThread` + `WaitOnAddress` & `XAudio2` → `AAudio` Bridge (2026-11-27)
+- **Commit:** `81568e6` (CI Run `45858200668` — Linux GCC tests 15s, Android ARM64 APK 1m22s)
 - **Status:** Implemented & verified (local MSVC 2022 + GitHub Actions Linux GCC & Android ARM64 NDK)
 - **Changes:**
   - Added copy-on-write writable save-game overlay (`set_write_overlay` / `resolve_for_write` with path-traversal guard) to `VfsMapper` and `WriteFile`/`FlushFileBuffers`/`GENERIC_WRITE` routing in `FileHandleTable` so save files never mutate the user's read-only BYOF PC directory.
@@ -67,4 +79,4 @@
 ---
 
 ## Upcoming Increments
-- **Increment 6 (M4):** In-swapchain Vulkan touch HUD overlay, multi-touch gesture-to-XInput routing (floating thumbstick + L1 Deflect / R1 Attack / Mikiri buttons), and GPL pipeline cache pre-warming.
+- **Increment 7 (M5 — Real Hardware Bring-Up):** Add optional workflow/packaging job to build & bundle upstream `box64` (`arm64-v8a`), `libvulkan_freedreno.so` (Turnip), and `libdxvk_{d3d11,dxgi}.so`, implement `IXAudio2` COM voice vtables, and validate first real-device boot with an Adreno 7xx/8xx handset.

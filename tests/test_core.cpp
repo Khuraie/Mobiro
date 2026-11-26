@@ -6,7 +6,9 @@
 #include "cpu_mem/win64_teb.hpp"
 #include "gfx/dxvk_config_gen.hpp"
 #include "gfx/dxvk_interop.hpp"
+#include "gfx/pipeline_cache_warmer.hpp"
 #include "input/input_router.hpp"
+#include "input/touch_controller.hpp"
 #include "sched/thread_balancer.hpp"
 #include "validator/archive_probe.hpp"
 #include "validator/pe_validator.hpp"
@@ -697,6 +699,62 @@ void test_vfs_write_overlay_threads_wait_and_audio() {
     fs::remove_all(tmp);
 }
 
+void test_touch_controller_and_cache_warmer() {
+    mobiro::input::InputRouter router;
+    mobiro::input::TouchController tc;
+    tc.set_viewport(1920.0f, 1080.0f);
+
+    // 1. Multi-touch: left floating stick (ptr 1) + L1 Deflect button (ptr 2) + right camera drag (ptr 3)
+    tc.on_pointer(1, mobiro::input::TouchAction::Down, 300.0f, 700.0f, router);
+    tc.on_pointer(1, mobiro::input::TouchAction::Move, 450.0f, 600.0f, router); // right + up
+    tc.on_pointer(2, mobiro::input::TouchAction::Down, 0.86f * 1920.0f, 0.44f * 1080.0f, router); // L1
+    tc.on_pointer(3, mobiro::input::TouchAction::Down, 0.54f * 1920.0f, 0.50f * 1080.0f, router);
+    tc.on_pointer(3, mobiro::input::TouchAction::Move, 0.59f * 1920.0f, 0.50f * 1080.0f, router);
+
+    auto snap = router.snapshot();
+    assert((snap.Gamepad.wButtons & mobiro::input::kLeftShoulder) != 0);
+    assert(snap.Gamepad.sThumbLX > 0 && snap.Gamepad.sThumbLY > 0);
+    assert(snap.Gamepad.sThumbRX > 0);
+
+    // Active floating stick produces 10 button quads + 2 stick quads = 12 quads
+    auto quads = tc.build_hud_quads();
+    assert(quads.size() == 12);
+
+    // Release camera & L1, then cancel clears left stick
+    tc.on_pointer(2, mobiro::input::TouchAction::Up, 0.86f * 1920.0f, 0.44f * 1080.0f, router);
+    tc.on_pointer(3, mobiro::input::TouchAction::Up, 0.59f * 1920.0f, 0.50f * 1080.0f, router);
+    snap = router.snapshot();
+    assert((snap.Gamepad.wButtons & mobiro::input::kLeftShoulder) == 0);
+    assert(snap.Gamepad.sThumbRX == 0);
+
+    tc.on_pointer(0, mobiro::input::TouchAction::Cancel, 0.0f, 0.0f, router);
+    snap = router.snapshot();
+    assert(snap.Gamepad.sThumbLX == 0 && snap.Gamepad.sThumbLY == 0);
+    assert(tc.build_hud_quads().size() == 10);
+
+    // 2. PipelineCacheWarmer: prunes stale build dirs & pre-reads active DXVK/Turnip cache files
+    const fs::path cache_root = fs::temp_directory_path() / "mobiro_test_cache_warm";
+    fs::remove_all(cache_root);
+    fs::create_directories(cache_root / "stale_old_build" / "dxvk");
+    fs::create_directories(cache_root / "active_fp_1234" / "dxvk");
+    {
+        std::ofstream f(cache_root / "active_fp_1234" / "dxvk" / "sekiro.dxvk-cache", std::ios::binary);
+        std::string blob(4096, 'P');
+        f.write(blob.data(), static_cast<std::streamsize>(blob.size()));
+    }
+
+    mobiro::gfx::PipelineCacheWarmer warmer;
+    warmer.start_async_warm(cache_root.string(), "active_fp_1234");
+    warmer.wait();
+    assert(warmer.is_done());
+    auto st = warmer.stats();
+    assert(st.completed && st.stale_dirs_pruned == 1 && st.files_warmed == 1 && st.bytes_warmed == 4096);
+    assert(!fs::exists(cache_root / "stale_old_build"));
+    assert(fs::exists(cache_root / "active_fp_1234" / "dxvk" / "sekiro.dxvk-cache"));
+
+    fs::remove_all(cache_root);
+}
+
 } // namespace
 
 int main() {
@@ -706,6 +764,7 @@ int main() {
     test_x86_64_guest_execution_and_seh();
     test_dxvk_interop_and_ms_x64_marshaling();
     test_vfs_write_overlay_threads_wait_and_audio();
+    test_touch_controller_and_cache_warmer();
     std::cout << "All Mobiro core unit tests passed.\n";
     return 0;
 }
