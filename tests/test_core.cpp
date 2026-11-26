@@ -939,6 +939,159 @@ void test_xaudio2_com_and_touch_overlay_vk() {
     b2.shutdown();
 }
 
+void write_synthetic_pe64_dll(const fs::path& path) {
+    // 2 sections: .text (RVA 0x1000, Raw 0x400), .edata (RVA 0x2000, Raw 0x800)
+    std::vector<uint8_t> img(0xC00, 0);
+    img[0] = 'M'; img[1] = 'Z';
+    const uint32_t pe_off = 0x80;
+    wr32(img, 0x3C, pe_off);
+    img[pe_off] = 'P'; img[pe_off + 1] = 'E';
+
+    const size_t coff = pe_off + 4;
+    wr16(img, coff + 0, 0x8664); // AMD64
+    wr16(img, coff + 2, 2);      // 2 sections
+    const uint16_t opt_size = 0xF0;
+    wr16(img, coff + 16, opt_size);
+    wr16(img, coff + 18, 0x2022); // IMAGE_FILE_DLL | EXECUTABLE
+
+    const size_t opt = coff + 20;
+    wr16(img, opt + 0, 0x020B);
+    wr32(img, opt + 16, 0x1000);
+    wr64(img, opt + 24, 0x0000000180000000ULL);
+    wr32(img, opt + 56, 0x3000);
+    wr32(img, opt + 60, 0x400);
+    wr32(img, opt + 108, 16);
+    wr32(img, opt + 112 + 0 * 8, 0x2000);     // DataDirectory[0] Export RVA
+    wr32(img, opt + 112 + 0 * 8 + 4, 0x100);  // Export Size
+
+    const size_t sec0 = opt + opt_size;
+    std::memcpy(&img[sec0], ".text", 5);
+    wr32(img, sec0 + 8, 0x400); wr32(img, sec0 + 12, 0x1000);
+    wr32(img, sec0 + 16, 0x400); wr32(img, sec0 + 20, 0x400);
+    wr32(img, sec0 + 36, 0x60000020u);
+
+    const size_t sec1 = sec0 + 40;
+    std::memcpy(&img[sec1], ".edata", 6);
+    wr32(img, sec1 + 8, 0x400); wr32(img, sec1 + 12, 0x2000);
+    wr32(img, sec1 + 16, 0x400); wr32(img, sec1 + 20, 0x800);
+    wr32(img, sec1 + 36, 0x40000040u);
+
+    // .text: single RET (0xC3) at RVA 0x1000
+    img[0x400] = 0xC3;
+
+    // Export Directory at RVA 0x2000 (file offset 0x800):
+    //   Base = 7, NumberOfFunctions = 1, NumberOfNames = 1
+    //   AddressOfFunctions = 0x2040 -> [0x1000]
+    //   AddressOfNames     = 0x2050 -> [0x2060]
+    //   AddressOfNameOrdinals = 0x2058 -> [0]
+    wr32(img, 0x800 + 16, 7);      // Base ordinal
+    wr32(img, 0x800 + 20, 1);      // NumberOfFunctions
+    wr32(img, 0x800 + 24, 1);      // NumberOfNames
+    wr32(img, 0x800 + 28, 0x2040); // AddressOfFunctions
+    wr32(img, 0x800 + 32, 0x2050); // AddressOfNames
+    wr32(img, 0x800 + 36, 0x2058); // AddressOfNameOrdinals
+    wr32(img, 0x840, 0x1000);      // Export[0] RVA
+    wr32(img, 0x850, 0x2060);      // Name[0] RVA
+    wr16(img, 0x858, 0);           // Ordinal index 0 -> ordinal 7
+    std::memcpy(&img[0x860], "MobiroExportedFn", 17);
+
+    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    f.write(reinterpret_cast<const char*>(img.data()), static_cast<std::streamsize>(img.size()));
+}
+
+void test_module_loader_and_headless_win32_ui() {
+    const fs::path tmp = fs::temp_directory_path() / "mobiro_test_m7";
+    fs::remove_all(tmp);
+    fs::create_directories(tmp);
+    write_synthetic_pe64_dll(tmp / "helper_guest.dll");
+
+    mobiro::validator::VfsMapper vfs;
+    assert(vfs.index_root(tmp.string()));
+    mobiro::mem::GuestArena arena;
+    assert(arena.reserve(0x0000000100000000ULL, 128ULL * 1024 * 1024));
+    mobiro::cpu::Box64Bridge bridge;
+    assert(bridge.initialize(&arena, &vfs));
+
+    // 1. LoadLibraryW maps real guest PE64 DLL & GetProcAddress resolves by name + ordinal
+    const uint16_t dll_w[] = {'h','e','l','p','e','r','_','g','u','e','s','t','.','d','l','l', 0};
+    x64emu_t emu{};
+    emu.rcx = reinterpret_cast<uint64_t>(dll_w);
+    assert(bridge.invoke_thunk("kernel32.dll", "LoadLibraryW", &emu));
+    const uint64_t hdll = emu.rax;
+    assert(hdll != 0 && arena.contains(static_cast<uintptr_t>(hdll), 0x3000));
+
+    emu = {};
+    emu.rcx = hdll;
+    emu.rdx = reinterpret_cast<uint64_t>("MobiroExportedFn");
+    assert(bridge.invoke_thunk("kernel32.dll", "GetProcAddress", &emu));
+    assert(emu.rax == hdll + 0x1000);
+
+    emu = {};
+    emu.rcx = hdll;
+    emu.rdx = 7; // Ordinal #7 (IS_INTRESOURCE)
+    assert(bridge.invoke_thunk("kernel32.dll", "GetProcAddress", &emu));
+    assert(emu.rax == hdll + 0x1000);
+
+    // 2. Native-thunked DLL lookup: LoadLibraryA("kernel32.dll") + GetProcAddress("GetTickCount64")
+    emu = {};
+    emu.rcx = reinterpret_cast<uint64_t>("kernel32.dll");
+    assert(bridge.invoke_thunk("kernel32.dll", "LoadLibraryA", &emu));
+    const uint64_t hk32 = emu.rax;
+    assert(mobiro::win32::ModuleRegistry::is_native_handle(static_cast<uintptr_t>(hk32)));
+
+    emu = {};
+    emu.rcx = hk32;
+    emu.rdx = reinterpret_cast<uint64_t>("GetTickCount64");
+    assert(bridge.invoke_thunk("kernel32.dll", "GetProcAddress", &emu));
+    auto* stub = reinterpret_cast<const mobiro::cpu::NativeBridgeStub*>(emu.rax);
+    assert(stub != nullptr && stub->trap_cc == 0xCC && stub->magic[0] == 'M' && stub->magic[1] == 'B');
+
+    // 3. Headless user32 window + message queue
+    bridge.window().set_dimensions(2400, 1080);
+    emu = {};
+    assert(bridge.invoke_thunk("user32.dll", "CreateWindowExW", &emu));
+    assert(emu.rax == mobiro::win32::HeadlessWindowState::kMainHwnd);
+
+    mobiro::win32::Win32Rect rc{};
+    emu = {}; emu.rcx = mobiro::win32::HeadlessWindowState::kMainHwnd; emu.rdx = reinterpret_cast<uint64_t>(&rc);
+    assert(bridge.invoke_thunk("user32.dll", "GetClientRect", &emu) && emu.rax == 1);
+    assert(rc.right == 2400 && rc.bottom == 1080);
+
+    emu = {}; emu.rcx = 0; // SM_CXSCREEN
+    assert(bridge.invoke_thunk("user32.dll", "GetSystemMetrics", &emu) && emu.rax == 2400);
+
+    emu = {}; emu.rcx = 0;
+    assert(bridge.invoke_thunk("user32.dll", "PostQuitMessage", &emu));
+    mobiro::win32::Win64Msg msg{};
+    uint64_t pm_stack[8]{};
+    pm_stack[5] = 1; // PM_REMOVE
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>(&msg); emu.rsp = reinterpret_cast<uint64_t>(pm_stack);
+    assert(bridge.invoke_thunk("user32.dll", "PeekMessageW", &emu) && emu.rax == 1);
+    assert(msg.message == mobiro::win32::HeadlessWindowState::kWmQuit);
+    assert(bridge.invoke_thunk("user32.dll", "PeekMessageW", &emu) && emu.rax == 0);
+
+    // 4. shell32 SHGetKnownFolderPath + ole32 CoTaskMemFree + winmm + bcrypt
+    uint16_t* known_path = nullptr;
+    emu = {}; emu.r9 = reinterpret_cast<uint64_t>(&known_path);
+    assert(bridge.invoke_thunk("shell32.dll", "SHGetKnownFolderPath", &emu) && emu.rax == 0);
+    assert(known_path != nullptr);
+    assert(mobiro::win32::utf16le_to_utf8(known_path) == "C:\\Users\\Mobiro\\AppData\\Roaming");
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>(known_path);
+    assert(bridge.invoke_thunk("ole32.dll", "CoTaskMemFree", &emu));
+
+    assert(bridge.invoke_thunk("winmm.dll", "timeGetTime", &emu) && emu.rax > 0);
+
+    uint8_t rnd[32]{};
+    emu = {}; emu.rdx = reinterpret_cast<uint64_t>(rnd); emu.r8 = sizeof(rnd);
+    assert(bridge.invoke_thunk("bcrypt.dll", "BCryptGenRandom", &emu) && emu.rax == 0);
+    bool any_nonzero = false;
+    for (uint8_t b : rnd) if (b != 0) any_nonzero = true;
+    assert(any_nonzero);
+
+    bridge.shutdown();
+    fs::remove_all(tmp);
+}
+
 } // namespace
 
 int main() {
@@ -950,6 +1103,7 @@ int main() {
     test_vfs_write_overlay_threads_wait_and_audio();
     test_touch_controller_and_cache_warmer();
     test_xaudio2_com_and_touch_overlay_vk();
+    test_module_loader_and_headless_win32_ui();
     std::cout << "All Mobiro core unit tests passed.\n";
     return 0;
 }

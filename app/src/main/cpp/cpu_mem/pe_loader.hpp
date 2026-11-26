@@ -8,6 +8,7 @@
 #include <cstring>
 #include <fstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace mobiro::cpu {
@@ -25,6 +26,8 @@ struct LoadedPeImage {
     size_t relocations_applied = 0;
     size_t imports_resolved = 0;
     std::vector<std::string> unresolved_imports;
+    std::unordered_map<std::string, uintptr_t> exports_by_name;
+    std::unordered_map<uint16_t, uintptr_t> exports_by_ordinal;
 };
 
 // Maps a validated Win64 PE32+ image into GuestArena, applies DIR64/HIGHLOW relocations
@@ -207,13 +210,52 @@ public:
                         }
                     }
 
-                    const uintptr_t stub = bridge.resolve_import(dll_name, sym_name);
+                    uintptr_t stub = bridge.resolve_import(dll_name, sym_name);
+                    if (stub == 0) {
+                        stub = bridge.modules().resolve_guest_export_by_dll(dll_name, sym_name);
+                    }
                     if (stub != 0) {
                         uint64_t patched = static_cast<uint64_t>(stub);
                         std::memcpy(base_ptr + i_rva, &patched, 8);
                         ++res.imports_resolved;
                     } else {
                         res.unresolved_imports.push_back(dll_name + "!" + sym_name);
+                    }
+                }
+            }
+        }
+
+        // 2b. Parse Export Directory (DataDirectory[0]) for guest DLL GetProcAddress resolution
+        uint32_t exp_rva = 0, exp_sz = 0;
+        if (data_dir(0, exp_rva, exp_sz) && exp_rva + 40 <= size_of_image) {
+            const uint8_t* ed = base_ptr + exp_rva;
+            const uint32_t ord_base   = rd32(ed + 16);
+            const uint32_t num_funcs  = rd32(ed + 20);
+            const uint32_t num_names  = rd32(ed + 24);
+            const uint32_t funcs_rva  = rd32(ed + 28);
+            const uint32_t names_rva  = rd32(ed + 32);
+            const uint32_t ords_rva   = rd32(ed + 36);
+
+            if (funcs_rva && funcs_rva + num_funcs * 4 <= size_of_image) {
+                for (uint32_t i = 0; i < num_funcs; ++i) {
+                    const uint32_t fn_rva = rd32(base_ptr + funcs_rva + i * 4);
+                    if (fn_rva != 0 && fn_rva < size_of_image) {
+                        res.exports_by_ordinal[static_cast<uint16_t>(ord_base + i)] = target_va + fn_rva;
+                    }
+                }
+                if (names_rva && ords_rva &&
+                    names_rva + num_names * 4 <= size_of_image &&
+                    ords_rva + num_names * 2 <= size_of_image) {
+                    for (uint32_t i = 0; i < num_names; ++i) {
+                        const uint32_t sym_rva = rd32(base_ptr + names_rva + i * 4);
+                        const uint16_t ord_idx = rd16(base_ptr + ords_rva + i * 2);
+                        if (sym_rva < size_of_image && ord_idx < num_funcs) {
+                            const uint32_t fn_rva = rd32(base_ptr + funcs_rva + ord_idx * 4);
+                            if (fn_rva != 0 && fn_rva < size_of_image) {
+                                const std::string sym(reinterpret_cast<const char*>(base_ptr + sym_rva));
+                                res.exports_by_name[sym] = target_va + fn_rva;
+                            }
+                        }
                     }
                 }
             }

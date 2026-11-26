@@ -52,7 +52,10 @@ meson setup "$BUILD_DIR/out" "$MESA_SRC" \
   -Degl=disabled \
   -Dgles1=disabled \
   -Dgles2=disabled \
-  -Dllvm=disabled
+  -Dllvm=disabled \
+  -Dzstd=disabled \
+  -Dxmlconfig=disabled \
+  -Dlibunwind=disabled
 
 ninja -C "$BUILD_DIR/out" src/freedreno/vulkan/libvulkan_freedreno.so
 cp -f "$BUILD_DIR/out/src/freedreno/vulkan/libvulkan_freedreno.so" "$JNI_OUT/"

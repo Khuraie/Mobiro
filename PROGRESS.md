@@ -6,7 +6,18 @@
 
 ## Log Entries
 
+### Increment 9 — M7: Dynamic Guest DLL Loader (`LoadLibrary`/`GetProcAddress`), Headless `user32`/`shell32`/`ole32`/`winmm`/`bcrypt` & Upstream Box64 Green + Turnip Fix (2026-11-27)
+- **Status:** Implemented & verified (local MSVC 2022 + GitHub Actions Linux GCC & Android ARM64 NDK)
+- **Changes:**
+  - Verified upstream **Box64 `arm64-v8a` ARM64 Dynarec cross-compilation passed** on GitHub Actions NDK 27.2.12479018 (Run `45862062389`), and fixed Mesa Turnip's host `zstd.h` leak in `scripts/build_turnip_android.sh` (`-Dzstd=disabled -Dxmlconfig=disabled -Dlibunwind=disabled`).
+  - Added PE64 Export Directory (`DataDirectory[0]`) parsing to `PeLoader` and implemented `ModuleRegistry` (`app/src/main/cpp/cpu_mem/win32_module_mgr.hpp`) backing `LoadLibraryW`/`A`/`ExW`, `GetModuleHandleW`/`A`, `GetProcAddress` (both guest DLL exports by name/ordinal and native-thunked Win32 DLLs), and `FreeLibrary`.
+  - Implemented `HeadlessWindowState` (`app/src/main/cpp/cpu_mem/win32_ui_misc.hpp`) and wired headless `user32.dll` (`RegisterClassEx`, `CreateWindowEx`, `GetClientRect`/`GetWindowRect`, `GetSystemMetrics`, `PeekMessage`, `PostQuitMessage`), `shell32.dll` (`SHGetKnownFolderPath`/`SHGetFolderPathW` routing `%APPDATA%` saves into VFS overlay), `ole32.dll` (`CoInitializeEx`/`CoTaskMemAlloc`/`CoTaskMemFree`), `winmm.dll` (`timeGetTime`/`timeBeginPeriod`), and `bcrypt.dll` (`BCryptGenRandom`).
+  - Added `test_module_loader_and_headless_win32_ui` in `tests/test_core.cpp` verifying live synthetic guest DLL export loading, native-thunked `GetProcAddress`, headless `user32` message pump, `SHGetKnownFolderPath`, and `BCryptGenRandom`.
+
+---
+
 ### Increment 8 — M6: XAudio2.7 COM Vtable + Linear Resampler, MSVC CRT Startup Shims, Embedded SPIR-V HUD Shaders & Upstream Cross-Build Fix (2026-11-27)
+- **Commit:** `837568b` (CI Run `45862004494` — Linux GCC tests 35s, Android ARM64 APK + artifact upload 1m20s)
 - **Status:** Implemented & verified (local MSVC 2022 + GitHub Actions Linux GCC & Android ARM64 NDK)
 - **Changes:**
   - Added legacy `IXAudio2_7Vtbl` (`GetDeviceCount`, `GetDeviceDetails`, `Initialize`, `CreateMasteringVoice` 7-arg signature) alongside `IXAudio2Vtbl` (XAudio2.9) and a stereo linear sample-rate resampler (`src_rate -> 48 kHz`) in `app/src/main/cpp/audio/xaudio2_com.hpp`, wiring `xaudio2_7.dll` and `xaudio2_9.dll` to their exact COM ABIs in `win32_shim.cpp`.

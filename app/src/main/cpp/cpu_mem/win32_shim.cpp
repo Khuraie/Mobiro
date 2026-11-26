@@ -1,10 +1,12 @@
 #include "box64_bridge.hpp"
+#include "pe_loader.hpp"
 #include "../audio/xaudio2_com.hpp"
 #include "../gfx/dxvk_interop.hpp"
 #include "../input/input_router.hpp"
 
 #include <chrono>
 #include <cstring>
+#include <random>
 #include <thread>
 
 #if defined(__linux__) || defined(__ANDROID__)
@@ -508,11 +510,199 @@ void thunk_GetCurrentProcessId(x64emu_t* emu) {
     reg_rax(emu) = teb ? teb->unique_process : 1000ULL;
 }
 
+uintptr_t load_library_common(Box64Bridge* b, const std::string& name, x64emu_t* emu) {
+    if (!b || name.empty()) return 0;
+    if (const uintptr_t existing = b->modules().find_module(name)) return existing;
+
+    // 1. Try loading a guest x86_64 DLL from the BYOF directory
+    std::string host_path;
+    if (b->vfs() && b->arena() && b->vfs()->resolve(name, host_path)) {
+        auto img = PeLoader::load_pe64(host_path, *b->arena(), *b, /*force_relocate=*/true);
+        if (img.ok) {
+            if (img.pdata_va && img.pdata_size) {
+                b->seh().register_image(img.mapped_base, img.pdata_va, img.pdata_size);
+            }
+            b->modules().register_guest_module(
+                name, img.mapped_base, img.image_size,
+                std::move(img.exports_by_name), std::move(img.exports_by_ordinal));
+            return img.mapped_base;
+        }
+    }
+
+    // 2. Fall back to synthetic HMODULE for built-in native-thunked Win32 DLLs
+    if (b->has_dll_thunks(name)) {
+        return b->modules().get_or_register_native(name);
+    }
+
+    if (auto* teb = current_teb(emu)) teb->last_error = 126u; // ERROR_MOD_NOT_FOUND
+    return 0;
+}
+
 void thunk_GetModuleHandleW(x64emu_t* emu) {
     auto* b = Box64Bridge::instance();
+    if (!b) { reg_rax(emu) = 0; return; }
     const uint64_t name_ptr = reg_rcx(emu);
-    // NULL returns main executable HMODULE (ImageBase)
-    reg_rax(emu) = (name_ptr == 0 && b) ? b->main_module_base() : 0ULL;
+    if (name_ptr == 0) {
+        reg_rax(emu) = b->main_module_base();
+        return;
+    }
+    const std::string name = win32::utf16le_to_utf8(reinterpret_cast<const uint16_t*>(name_ptr));
+    if (const uintptr_t found = b->modules().find_module(name)) {
+        reg_rax(emu) = found;
+        return;
+    }
+    reg_rax(emu) = b->has_dll_thunks(name) ? b->modules().get_or_register_native(name) : 0ULL;
+}
+
+void thunk_GetModuleHandleA(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    if (!b) { reg_rax(emu) = 0; return; }
+    const auto* name_ptr = reinterpret_cast<const char*>(reg_rcx(emu));
+    if (!name_ptr) {
+        reg_rax(emu) = b->main_module_base();
+        return;
+    }
+    if (const uintptr_t found = b->modules().find_module(name_ptr)) {
+        reg_rax(emu) = found;
+        return;
+    }
+    reg_rax(emu) = b->has_dll_thunks(name_ptr) ? b->modules().get_or_register_native(name_ptr) : 0ULL;
+}
+
+void thunk_LoadLibraryW(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    const std::string name = win32::utf16le_to_utf8(reinterpret_cast<const uint16_t*>(reg_rcx(emu)));
+    reg_rax(emu) = load_library_common(b, name, emu);
+}
+
+void thunk_LoadLibraryA(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    const auto* s = reinterpret_cast<const char*>(reg_rcx(emu));
+    reg_rax(emu) = s ? load_library_common(b, s, emu) : 0ULL;
+}
+
+void thunk_FreeLibrary(x64emu_t* emu) {
+    reg_rax(emu) = (reg_rcx(emu) != 0) ? 1ULL : 0ULL;
+}
+
+void thunk_GetProcAddress(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    if (!b) { reg_rax(emu) = 0; return; }
+    const uintptr_t hmod = static_cast<uintptr_t>(reg_rcx(emu));
+    const auto* sym_ptr = reinterpret_cast<const char*>(reg_rdx(emu));
+    if (!hmod || !sym_ptr) { reg_rax(emu) = 0; return; }
+
+    if (win32::ModuleRegistry::is_native_handle(hmod)) {
+        std::string dll_name;
+        if (!b->modules().native_name_for_handle(hmod, dll_name)) {
+            reg_rax(emu) = 0;
+            return;
+        }
+        const uintptr_t raw = reinterpret_cast<uintptr_t>(sym_ptr);
+        const std::string sym = (raw < 0x10000ULL) ? ("#" + std::to_string(raw)) : std::string(sym_ptr);
+        reg_rax(emu) = b->resolve_import(dll_name, sym);
+        return;
+    }
+    reg_rax(emu) = b->modules().resolve_guest_export(hmod, sym_ptr);
+}
+
+// --- Headless user32 Window & Message Pump ---
+
+void thunk_RegisterClassEx(x64emu_t* emu) { reg_rax(emu) = 0xC001ULL; }
+void thunk_CreateWindowEx(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    if (b) {
+        auto surf = mobiro::gfx::DxvkInterop::global().surface();
+        if (surf.width > 0 && surf.height > 0) {
+            b->window().set_dimensions(surf.width, surf.height);
+        }
+    }
+    reg_rax(emu) = win32::HeadlessWindowState::kMainHwnd;
+}
+void thunk_ReturnTrue(x64emu_t* emu) { reg_rax(emu) = 1ULL; }
+void thunk_ReturnZero(x64emu_t* emu) { reg_rax(emu) = 0ULL; }
+void thunk_GetClientRect(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    auto* out = reinterpret_cast<win32::Win32Rect*>(reg_rdx(emu));
+    if (!b || !out) { reg_rax(emu) = 0; return; }
+    *out = b->window().client_rect();
+    reg_rax(emu) = 1ULL;
+}
+void thunk_GetSystemMetrics(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    const int idx = static_cast<int>(reg_rcx(emu));
+    const auto r = b ? b->window().client_rect() : win32::Win32Rect{};
+    if (idx == 0) reg_rax(emu) = static_cast<uint64_t>(r.right);       // SM_CXSCREEN
+    else if (idx == 1) reg_rax(emu) = static_cast<uint64_t>(r.bottom); // SM_CYSCREEN
+    else reg_rax(emu) = 0ULL;
+}
+void thunk_PeekMessage(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    auto* out = reinterpret_cast<win32::Win64Msg*>(reg_rcx(emu));
+    const uint32_t remove_flag = static_cast<uint32_t>(stack_arg(emu, 0)); // arg5: wRemoveMsg
+    reg_rax(emu) = (b && b->window().peek_message(out, (remove_flag & 1u) != 0)) ? 1ULL : 0ULL;
+}
+void thunk_PostQuitMessage(x64emu_t* emu) {
+    if (auto* b = Box64Bridge::instance()) {
+        b->window().post_quit(static_cast<int32_t>(reg_rcx(emu)));
+    }
+}
+
+// --- shell32 / ole32 / winmm / bcrypt ---
+
+void thunk_SHGetKnownFolderPath(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    auto** out_path = reinterpret_cast<uint16_t**>(reg_r9(emu));
+    if (!b || !out_path) { reg_rax(emu) = 0x80070057ULL; return; }
+    static const uint16_t kAppData[] = {
+        'C',':','\\','U','s','e','r','s','\\','M','o','b','i','r','o','\\',
+        'A','p','p','D','a','t','a','\\','R','o','a','m','i','n','g', 0
+    };
+    const uintptr_t mem = b->heap().alloc(sizeof(kAppData), true);
+    if (!mem) { reg_rax(emu) = 0x8007000EULL; return; } // E_OUTOFMEMORY
+    std::memcpy(reinterpret_cast<void*>(mem), kAppData, sizeof(kAppData));
+    *out_path = reinterpret_cast<uint16_t*>(mem);
+    reg_rax(emu) = 0ULL; // S_OK
+}
+
+void thunk_SHGetFolderPathW(x64emu_t* emu) {
+    auto* out_buf = reinterpret_cast<uint16_t*>(stack_arg(emu, 0)); // arg5: pszPath (MAX_PATH)
+    if (!out_buf) { reg_rax(emu) = 0x80070057ULL; return; }
+    static const uint16_t kAppData[] = {
+        'C',':','\\','U','s','e','r','s','\\','M','o','b','i','r','o','\\',
+        'A','p','p','D','a','t','a','\\','R','o','a','m','i','n','g', 0
+    };
+    std::memcpy(out_buf, kAppData, sizeof(kAppData));
+    reg_rax(emu) = 0ULL; // S_OK
+}
+
+void thunk_CoTaskMemAlloc(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    reg_rax(emu) = b ? b->heap().alloc(static_cast<size_t>(reg_rcx(emu)), false) : 0ULL;
+}
+
+void thunk_CoTaskMemFree(x64emu_t* emu) {
+    if (auto* b = Box64Bridge::instance()) b->heap().free(static_cast<uintptr_t>(reg_rcx(emu)));
+}
+
+void thunk_timeGetTime(x64emu_t* emu) {
+    const auto now = std::chrono::steady_clock::now().time_since_epoch();
+    reg_rax(emu) = static_cast<uint32_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(now).count());
+}
+
+void thunk_BCryptGenRandom(x64emu_t* emu) {
+    auto* buf = reinterpret_cast<uint8_t*>(reg_rdx(emu));
+    const uint32_t len = static_cast<uint32_t>(reg_r8(emu));
+    if (!buf && len > 0) { reg_rax(emu) = 0xC000000DULL; return; } // STATUS_INVALID_PARAMETER
+    std::random_device rd;
+    for (uint32_t i = 0; i < len; ) {
+        const uint32_t v = rd();
+        for (int b = 0; b < 4 && i < len; ++b, ++i) {
+            buf[i] = static_cast<uint8_t>((v >> (b * 8)) & 0xFFu);
+        }
+    }
+    reg_rax(emu) = 0ULL; // STATUS_SUCCESS
 }
 
 // --- Input ---
@@ -619,6 +809,8 @@ void Box64Bridge::shutdown() {
     srw_locks_.clear();
     crit_sections_.clear();
     events_.clear();
+    modules_.clear();
+    window_.clear();
     heap_.reset();
     if (stub_pool_) {
 #if defined(__linux__) || defined(__ANDROID__)
@@ -683,6 +875,13 @@ void Box64Bridge::register_default_win32_thunks() {
     register_thunk("kernel32.dll", "GetCurrentThreadId", &thunk_GetCurrentThreadId);
     register_thunk("kernel32.dll", "GetCurrentProcessId", &thunk_GetCurrentProcessId);
     register_thunk("kernel32.dll", "GetModuleHandleW", &thunk_GetModuleHandleW);
+    register_thunk("kernel32.dll", "GetModuleHandleA", &thunk_GetModuleHandleA);
+    register_thunk("kernel32.dll", "LoadLibraryW", &thunk_LoadLibraryW);
+    register_thunk("kernel32.dll", "LoadLibraryA", &thunk_LoadLibraryA);
+    register_thunk("kernel32.dll", "LoadLibraryExW", &thunk_LoadLibraryW);
+    register_thunk("kernel32.dll", "LoadLibraryExA", &thunk_LoadLibraryA);
+    register_thunk("kernel32.dll", "GetProcAddress", &thunk_GetProcAddress);
+    register_thunk("kernel32.dll", "FreeLibrary", &thunk_FreeLibrary);
     register_thunk("kernel32.dll", "GetLastError", &thunk_GetLastError);
     register_thunk("kernel32.dll", "SetLastError", &thunk_SetLastError);
     register_thunk("kernel32.dll", "GetSystemInfo", &thunk_GetSystemInfo);
@@ -742,6 +941,45 @@ void Box64Bridge::register_default_win32_thunks() {
     register_thunk("d3d11.dll", "D3D11CreateDeviceAndSwapChain", &thunk_D3D11CreateDeviceAndSwapChain);
     register_thunk("dxgi.dll", "CreateDXGIFactory1", &thunk_CreateDXGIFactory1);
     register_thunk("dxgi.dll", "CreateDXGIFactory2", &thunk_CreateDXGIFactory1);
+
+    // Headless Window / Message Pump (user32)
+    register_thunk("user32.dll", "RegisterClassExW", &thunk_RegisterClassEx);
+    register_thunk("user32.dll", "RegisterClassExA", &thunk_RegisterClassEx);
+    register_thunk("user32.dll", "CreateWindowExW", &thunk_CreateWindowEx);
+    register_thunk("user32.dll", "CreateWindowExA", &thunk_CreateWindowEx);
+    register_thunk("user32.dll", "ShowWindow", &thunk_ReturnTrue);
+    register_thunk("user32.dll", "UpdateWindow", &thunk_ReturnTrue);
+    register_thunk("user32.dll", "SetWindowPos", &thunk_ReturnTrue);
+    register_thunk("user32.dll", "MoveWindow", &thunk_ReturnTrue);
+    register_thunk("user32.dll", "AdjustWindowRectEx", &thunk_ReturnTrue);
+    register_thunk("user32.dll", "SetForegroundWindow", &thunk_ReturnTrue);
+    register_thunk("user32.dll", "SetFocus", &thunk_CreateWindowEx);
+    register_thunk("user32.dll", "ShowCursor", &thunk_ReturnZero);
+    register_thunk("user32.dll", "ClipCursor", &thunk_ReturnTrue);
+    register_thunk("user32.dll", "GetClientRect", &thunk_GetClientRect);
+    register_thunk("user32.dll", "GetWindowRect", &thunk_GetClientRect);
+    register_thunk("user32.dll", "GetSystemMetrics", &thunk_GetSystemMetrics);
+    register_thunk("user32.dll", "PeekMessageW", &thunk_PeekMessage);
+    register_thunk("user32.dll", "PeekMessageA", &thunk_PeekMessage);
+    register_thunk("user32.dll", "TranslateMessage", &thunk_ReturnZero);
+    register_thunk("user32.dll", "DispatchMessageW", &thunk_ReturnZero);
+    register_thunk("user32.dll", "DispatchMessageA", &thunk_ReturnZero);
+    register_thunk("user32.dll", "DefWindowProcW", &thunk_ReturnZero);
+    register_thunk("user32.dll", "DefWindowProcA", &thunk_ReturnZero);
+    register_thunk("user32.dll", "PostQuitMessage", &thunk_PostQuitMessage);
+
+    // Shell / COM / Multimedia Timer / Entropy
+    register_thunk("shell32.dll", "SHGetKnownFolderPath", &thunk_SHGetKnownFolderPath);
+    register_thunk("shell32.dll", "SHGetFolderPathW", &thunk_SHGetFolderPathW);
+    register_thunk("ole32.dll", "CoInitialize", &thunk_ReturnZero);
+    register_thunk("ole32.dll", "CoInitializeEx", &thunk_ReturnZero);
+    register_thunk("ole32.dll", "CoUninitialize", &thunk_ReturnZero);
+    register_thunk("ole32.dll", "CoTaskMemAlloc", &thunk_CoTaskMemAlloc);
+    register_thunk("ole32.dll", "CoTaskMemFree", &thunk_CoTaskMemFree);
+    register_thunk("winmm.dll", "timeGetTime", &thunk_timeGetTime);
+    register_thunk("winmm.dll", "timeBeginPeriod", &thunk_ReturnZero);
+    register_thunk("winmm.dll", "timeEndPeriod", &thunk_ReturnZero);
+    register_thunk("bcrypt.dll", "BCryptGenRandom", &thunk_BCryptGenRandom);
 }
 
 } // namespace mobiro::cpu

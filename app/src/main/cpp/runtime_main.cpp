@@ -253,6 +253,7 @@ void handle_app_cmd(android_app* app, int32_t cmd) {
                 mobiro::gfx::DxvkInterop::global().set_native_window(app->window);
                 auto s = mobiro::gfx::DxvkInterop::global().surface();
                 g_rt.touch_ctrl.set_viewport(static_cast<float>(s.width), static_cast<float>(s.height));
+                g_rt.box64.window().set_dimensions(s.width, s.height);
                 __android_log_print(ANDROID_LOG_INFO, kLogTag,
                                     "ANativeWindow bound: %dx%d (gen=%llu)",
                                     s.width, s.height,

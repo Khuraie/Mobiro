@@ -2,8 +2,10 @@
 
 #include "guest_arena.hpp"
 #include "win32_file_sync.hpp"
+#include "win32_module_mgr.hpp"
 #include "win32_proc_sync.hpp"
 #include "win32_thread_wait.hpp"
+#include "win32_ui_misc.hpp"
 #include "win64_teb.hpp"
 #include "../validator/vfs_mapper.hpp"
 
@@ -56,6 +58,14 @@ public:
 
     size_t registered_count() const { return thunks_.size(); }
 
+    bool has_dll_thunks(const std::string& dll_lower) const {
+        const std::string prefix = win32::ModuleRegistry::basename_lower(dll_lower) + "!";
+        for (const auto& [k, _] : thunks_) {
+            if (k.rfind(prefix, 0) == 0) return true;
+        }
+        return false;
+    }
+
     static Box64Bridge* instance() { return g_instance_; }
     mem::GuestArena* arena() const { return arena_; }
     validator::VfsMapper* vfs() const { return vfs_; }
@@ -67,6 +77,8 @@ public:
     win32::SehUnwindRegistry& seh() { return seh_; }
     win32::AddressWaitTable& addr_wait() { return addr_wait_; }
     win32::GuestThreadTable& threads() { return threads_; }
+    win32::ModuleRegistry& modules() { return modules_; }
+    win32::HeadlessWindowState& window() { return window_; }
     void set_main_module_base(uintptr_t base) { main_module_base_ = base; }
     uintptr_t main_module_base() const { return main_module_base_; }
     void set_main_teb(Win64Teb* teb) { main_teb_ = teb; }
@@ -89,6 +101,8 @@ private:
     win32::SehUnwindRegistry seh_;
     win32::AddressWaitTable addr_wait_;
     win32::GuestThreadTable threads_;
+    win32::ModuleRegistry modules_;
+    win32::HeadlessWindowState window_;
     uintptr_t main_module_base_ = 0;
     Win64Teb* main_teb_ = nullptr;
     uint32_t next_tls_slot_ = 0;
