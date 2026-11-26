@@ -3,9 +3,11 @@
 #include "turnip_loader.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <thread>
 
 #if defined(__ANDROID__)
 #include <android/native_window.h>
@@ -90,7 +92,9 @@ public:
                 reinterpret_cast<PfnD3D11CreateDeviceAndSwapChain>(
                     dlsym(d3d11_dl_, "D3D11CreateDeviceAndSwapChain"));
         }
-        return backend_.d3d11_create_device != nullptr && backend_.create_dxgi_factory1 != nullptr;
+        const bool ok = backend_.d3d11_create_device != nullptr && backend_.create_dxgi_factory1 != nullptr;
+        auto_wrap_com_.store(ok, std::memory_order_release);
+        return ok;
 #else
         (void)native_lib_dir;
         return false;
@@ -109,10 +113,37 @@ public:
 #endif
     }
 
-    // Allows unit tests or custom builds to inject a backend table directly
-    void set_backend_override(const DxvkBackendTable& table) {
+    void set_backend_override(const DxvkBackendTable& table, bool auto_wrap_com = false) {
         std::lock_guard<std::mutex> lock(mu_);
         backend_ = table;
+        auto_wrap_com_.store(auto_wrap_com, std::memory_order_release);
+    }
+
+    void set_auto_wrap_com(bool enable) { auto_wrap_com_.store(enable, std::memory_order_release); }
+    bool auto_wrap_com() const { return auto_wrap_com_.load(std::memory_order_acquire); }
+
+    // Sleeps the remainder of the active 60/30 FPS frame interval on Present()
+    void pace_present() {
+        const auto interval = std::chrono::nanoseconds(target_frame_interval_ns());
+        const auto now = std::chrono::steady_clock::now();
+        std::chrono::steady_clock::time_point wake_at{};
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            if (last_present_.time_since_epoch().count() == 0) {
+                last_present_ = now;
+                return;
+            }
+            wake_at = last_present_ + interval;
+            last_present_ = (wake_at > now) ? wake_at : now;
+        }
+        if (wake_at > now) {
+            std::this_thread::sleep_until(wake_at);
+        }
+    }
+
+    void reset_pacer() {
+        std::lock_guard<std::mutex> lock(mu_);
+        last_present_ = {};
     }
 
     void set_native_window(void* window, int32_t width = 0, int32_t height = 0) {
@@ -190,6 +221,8 @@ private:
     mutable std::mutex mu_;
     DxvkBackendTable backend_{};
     SurfaceSnapshot surface_{};
+    std::atomic<bool> auto_wrap_com_{false};
+    std::chrono::steady_clock::time_point last_present_{};
     void* dxgi_dl_ = nullptr;
     void* d3d11_dl_ = nullptr;
 };

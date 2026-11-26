@@ -37,21 +37,20 @@ public:
             res.error = "Invalid guest function address or Win64ThreadEnv.";
             return res;
         }
+#ifdef MOBIRO_HAVE_BOX64
+        (void)max_steps;
+        res.ok = mobiro_box64_call_fn(
+            fn_va, rcx, rdx, r8,
+            tenv.stack_base, static_cast<uint32_t>(tenv.stack_base - tenv.stack_limit),
+            reinterpret_cast<uintptr_t>(tenv.teb), kReturnSentinel, &res.exit_rax) != 0;
+        if (!res.ok) res.error = "Box64 DynaRun execution failed.";
+        return res;
+#else
         x64emu_t emu{};
         uint64_t rsp = (tenv.stack_base - 0x100) & ~uint64_t(0xF);
         rsp -= 8;
         uint64_t sentinel = kReturnSentinel;
         std::memcpy(reinterpret_cast<void*>(rsp), &sentinel, 8);
-#ifdef MOBIRO_HAVE_BOX64
-        emu.regs[_SP].q[0] = rsp;
-        emu.regs[_CX].q[0] = rcx;
-        emu.regs[_DX].q[0] = rdx;
-        emu.regs[_R8].q[0] = r8;
-        emu.ip.q[0] = fn_va;
-        emu.segs_offs[_GS] = reinterpret_cast<uintptr_t>(tenv.teb);
-        res.error = "Box64 Run() entrypoint wired; link arm64-v8a libbox64_core.a to execute full game.";
-        return res;
-#else
         emu.rsp = rsp;
         emu.rcx = rcx;
         emu.rdx = rdx;
@@ -93,6 +92,7 @@ public:
             res.error = "Invalid PE image.";
             return res;
         }
+        run_tls_callbacks(img, tenv);
         return call_guest_fn(img.entry_point, img.mapped_base, 1ULL, 0ULL, tenv, max_steps);
     }
 

@@ -1,4 +1,5 @@
 #include "box64_bridge.hpp"
+#include "guest_executor.hpp"
 #include "pe_loader.hpp"
 #include "win32_ext_shims.hpp"
 #include "../audio/xaudio2_com.hpp"
@@ -20,55 +21,19 @@ namespace mobiro::cpu {
 
 namespace {
 
-inline uint64_t& reg_rax(x64emu_t* e) {
-#ifdef MOBIRO_HAVE_BOX64
-    return e->regs[_AX].q[0];
-#else
-    return e->rax;
-#endif
-}
-inline uint64_t reg_rcx(x64emu_t* e) {
-#ifdef MOBIRO_HAVE_BOX64
-    return e->regs[_CX].q[0];
-#else
-    return e->rcx;
-#endif
-}
-inline uint64_t reg_rdx(x64emu_t* e) {
-#ifdef MOBIRO_HAVE_BOX64
-    return e->regs[_DX].q[0];
-#else
-    return e->rdx;
-#endif
-}
-inline uint64_t reg_r8(x64emu_t* e) {
-#ifdef MOBIRO_HAVE_BOX64
-    return e->regs[_R8].q[0];
-#else
-    return e->r8;
-#endif
-}
-inline uint64_t reg_r9(x64emu_t* e) {
-#ifdef MOBIRO_HAVE_BOX64
-    return e->regs[_R9].q[0];
-#else
-    return e->r9;
-#endif
-}
+inline uint64_t& reg_rax(x64emu_t* e) { return emu_reg_rax(e); }
+inline uint64_t reg_rcx(x64emu_t* e) { return emu_reg_rcx(e); }
+inline uint64_t reg_rdx(x64emu_t* e) { return emu_reg_rdx(e); }
+inline uint64_t reg_r8(x64emu_t* e) { return emu_reg_r8(e); }
+inline uint64_t reg_r9(x64emu_t* e) { return emu_reg_r9(e); }
 inline uint64_t stack_arg(x64emu_t* e, size_t win64_arg_index_from_5) {
     // Win64 stack layout at thunk entry: [RSP+0x00]=retaddr, [0x08..0x20]=shadow space, [0x28]=arg5
-#ifdef MOBIRO_HAVE_BOX64
-    auto* sp = reinterpret_cast<const uint64_t*>(e->regs[_SP].q[0]);
-#else
-    auto* sp = reinterpret_cast<const uint64_t*>(e->rsp);
-#endif
+    auto* sp = reinterpret_cast<const uint64_t*>(emu_reg_rsp(e));
     if (!sp) return 0;
     return sp[5 + win64_arg_index_from_5];
 }
 inline Win64Teb* current_teb(x64emu_t* e) {
-#ifndef MOBIRO_HAVE_BOX64
-    if (e && e->gs_base) return reinterpret_cast<Win64Teb*>(e->gs_base);
-#endif
+    if (const uintptr_t va = emu_teb_va(e)) return reinterpret_cast<Win64Teb*>(va);
     auto* b = Box64Bridge::instance();
     return b ? b->main_teb() : nullptr;
 }
@@ -528,6 +493,12 @@ uintptr_t load_library_common(Box64Bridge* b, const std::string& name, x64emu_t*
             b->modules().register_guest_module(
                 name, img.mapped_base, img.image_size,
                 std::move(img.exports_by_name), std::move(img.exports_by_ordinal));
+            if (const auto* tenv = b->main_thread_env()) {
+                GuestExecutor::run_tls_callbacks(img, *tenv);
+                if (img.entry_point) {
+                    GuestExecutor::call_guest_fn(img.entry_point, img.mapped_base, 1ULL, 0ULL, *tenv);
+                }
+            }
             return img.mapped_base;
         }
     }
@@ -884,7 +855,8 @@ void thunk_XInputSetState(x64emu_t* emu) {
 //   [RSP+0x28]: pFeatureLevels, [RSP+0x30]: FeatureLevels, [RSP+0x38]: SDKVersion,
 //   [RSP+0x40]: ppDevice, [RSP+0x48]: pFeatureLevel, [RSP+0x50]: ppImmediateContext)
 void thunk_D3D11CreateDevice(x64emu_t* emu) {
-    auto* adapter            = reinterpret_cast<void*>(reg_rcx(emu));
+    auto& com                = mobiro::gfx::D3D11ComBridge::global();
+    auto* adapter            = reinterpret_cast<void*>(com.unwrap_arg(reg_rcx(emu)));
     const auto driver_type   = static_cast<uint32_t>(reg_rdx(emu));
     auto* software           = reinterpret_cast<void*>(reg_r8(emu));
     const auto flags         = static_cast<uint32_t>(reg_r9(emu));
@@ -895,16 +867,26 @@ void thunk_D3D11CreateDevice(x64emu_t* emu) {
     auto* out_level          = reinterpret_cast<uint32_t*>(stack_arg(emu, 4));
     auto** out_context       = reinterpret_cast<void**>(stack_arg(emu, 5));
 
-    const int32_t hr = mobiro::gfx::DxvkInterop::global().call_d3d11_create_device(
+    const auto& dxvk = mobiro::gfx::DxvkInterop::global();
+    const int32_t hr = dxvk.call_d3d11_create_device(
         adapter, driver_type, software, flags,
         feat_levels, num_levels, sdk_version,
         out_device, out_level, out_context);
+    if (hr == 0 && dxvk.auto_wrap_com()) {
+        if (out_device && *out_device) {
+            *out_device = com.wrap(*out_device, mobiro::gfx::d3d11_abi::ComIfaceId::D3D11Device);
+        }
+        if (out_context && *out_context) {
+            *out_context = com.wrap(*out_context, mobiro::gfx::d3d11_abi::ComIfaceId::D3D11DeviceContext);
+        }
+    }
     reg_rax(emu) = static_cast<uint64_t>(static_cast<uint32_t>(hr));
 }
 
 // HRESULT D3D11CreateDeviceAndSwapChain (12 args: 4 regs + 8 stack args)
 void thunk_D3D11CreateDeviceAndSwapChain(x64emu_t* emu) {
-    auto* adapter            = reinterpret_cast<void*>(reg_rcx(emu));
+    auto& com                = mobiro::gfx::D3D11ComBridge::global();
+    auto* adapter            = reinterpret_cast<void*>(com.unwrap_arg(reg_rcx(emu)));
     const auto driver_type   = static_cast<uint32_t>(reg_rdx(emu));
     auto* software           = reinterpret_cast<void*>(reg_r8(emu));
     const auto flags         = static_cast<uint32_t>(reg_r9(emu));
@@ -917,10 +899,22 @@ void thunk_D3D11CreateDeviceAndSwapChain(x64emu_t* emu) {
     auto* out_level          = reinterpret_cast<uint32_t*>(stack_arg(emu, 6));
     auto** out_context       = reinterpret_cast<void**>(stack_arg(emu, 7));
 
-    const int32_t hr = mobiro::gfx::DxvkInterop::global().call_d3d11_create_device_and_swap_chain(
+    const auto& dxvk = mobiro::gfx::DxvkInterop::global();
+    const int32_t hr = dxvk.call_d3d11_create_device_and_swap_chain(
         adapter, driver_type, software, flags,
         feat_levels, num_levels, sdk_version,
         sc_desc, out_swap_chain, out_device, out_level, out_context);
+    if (hr == 0 && dxvk.auto_wrap_com()) {
+        if (out_swap_chain && *out_swap_chain) {
+            *out_swap_chain = com.wrap(*out_swap_chain, mobiro::gfx::d3d11_abi::ComIfaceId::DXGISwapChain);
+        }
+        if (out_device && *out_device) {
+            *out_device = com.wrap(*out_device, mobiro::gfx::d3d11_abi::ComIfaceId::D3D11Device);
+        }
+        if (out_context && *out_context) {
+            *out_context = com.wrap(*out_context, mobiro::gfx::d3d11_abi::ComIfaceId::D3D11DeviceContext);
+        }
+    }
     reg_rax(emu) = static_cast<uint64_t>(static_cast<uint32_t>(hr));
 }
 
@@ -928,7 +922,12 @@ void thunk_D3D11CreateDeviceAndSwapChain(x64emu_t* emu) {
 void thunk_CreateDXGIFactory1(x64emu_t* emu) {
     const auto* riid  = reinterpret_cast<const void*>(reg_rcx(emu));
     auto** out_factory = reinterpret_cast<void**>(reg_rdx(emu));
-    const int32_t hr = mobiro::gfx::DxvkInterop::global().call_create_dxgi_factory1(riid, out_factory);
+    const auto& dxvk = mobiro::gfx::DxvkInterop::global();
+    const int32_t hr = dxvk.call_create_dxgi_factory1(riid, out_factory);
+    if (hr == 0 && dxvk.auto_wrap_com() && out_factory && *out_factory) {
+        *out_factory = mobiro::gfx::D3D11ComBridge::global().wrap(
+            *out_factory, mobiro::gfx::d3d11_abi::ComIfaceId::DXGIFactory1);
+    }
     reg_rax(emu) = static_cast<uint64_t>(static_cast<uint32_t>(hr));
 }
 

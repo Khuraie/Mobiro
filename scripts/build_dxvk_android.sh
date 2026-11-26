@@ -24,6 +24,7 @@ fi
 
 CROSS_FILE="$BUILD_DIR/dxvk-android-aarch64.cross"
 mkdir -p "$BUILD_DIR" "$JNI_OUT"
+python3 "$ROOT_DIR/scripts/patch_dxvk_android_wsi.py" "$DXVK_SRC"
 cat > "$CROSS_FILE" <<EOF
 [binaries]
 c = '$BIN/aarch64-linux-android31-clang'
@@ -39,7 +40,11 @@ cpu = 'armv8'
 endian = 'little'
 EOF
 
-meson setup "$BUILD_DIR/out" "$DXVK_SRC" \
+SETUP_FLAGS=()
+if [ -d "$BUILD_DIR/out/meson-private" ]; then
+  SETUP_FLAGS+=(--wipe)
+fi
+meson setup "$BUILD_DIR/out" "$DXVK_SRC" "${SETUP_FLAGS[@]}" \
   --cross-file "$CROSS_FILE" \
   -Dbuildtype=release \
   -Denable_d3d8=false \

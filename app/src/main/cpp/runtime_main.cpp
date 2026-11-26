@@ -1,8 +1,10 @@
 #include "audio/aaudio_xaudio_bridge.hpp"
 #include "cpu_mem/box64_bridge.hpp"
 #include "cpu_mem/guest_arena.hpp"
+#include "cpu_mem/guest_executor.hpp"
 #include "cpu_mem/pe_loader.hpp"
 #include "cpu_mem/win64_teb.hpp"
+#include "gfx/d3d11_com_bridge.hpp"
 #include "gfx/dxvk_config_gen.hpp"
 #include "gfx/dxvk_interop.hpp"
 #include "gfx/pipeline_cache_warmer.hpp"
@@ -127,6 +129,12 @@ void process_game_activity_input(android_app* app) {
 
 } // namespace
 
+// Exported C symbol resolved via dlsym(RTLD_DEFAULT) by DXVK's AndroidWsiDriver
+extern "C" __attribute__((visibility("default")))
+void* mobiro_get_android_native_window() {
+    return mobiro::gfx::DxvkInterop::global().surface().native_window;
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_mobiro_runtime_MainActivity_nativeConfigureAndValidate(
     JNIEnv* env, jobject /*thiz*/, jstring jGameDir, jstring jSaveDir, jstring jCacheDir, jstring jNativeLibDir) {
@@ -172,6 +180,7 @@ Java_com_mobiro_runtime_MainActivity_nativeConfigureAndValidate(
     };
     mobiro::gfx::write_dxvk_conf(dxvk_conf_path, params);
 
+    setenv("DXVK_WSI_DRIVER", "Android", 1);
     setenv("DXVK_CONFIG_FILE", dxvk_conf_path.c_str(), 1);
     setenv("DXVK_STATE_CACHE_PATH", (build_cache + "/dxvk").c_str(), 1);
     setenv("MESA_SHADER_CACHE_DIR", (build_cache + "/turnip").c_str(), 1);
@@ -181,6 +190,11 @@ Java_com_mobiro_runtime_MainActivity_nativeConfigureAndValidate(
     g_rt.vk_driver = mobiro::gfx::load_vulkan_driver(lib_dir);
     g_rt.touch_overlay.attach_vulkan_loader(g_rt.vk_driver.get_instance_proc_addr);
     const bool dxvk_loaded = mobiro::gfx::DxvkInterop::global().load_native_libraries(lib_dir);
+    mobiro::gfx::D3D11ComBridge::global().set_present_hook(
+        [](void*, uint32_t, uint32_t) {
+            g_rt.touch_overlay.pack_quads(g_rt.touch_ctrl.build_hud_quads());
+            mobiro::gfx::DxvkInterop::global().pace_present();
+        });
     __android_log_print(ANDROID_LOG_INFO, kLogTag, "Vulkan ICD loaded: %s (turnip=%d, dxvk_native=%d)",
                         g_rt.vk_driver.loaded_path.c_str(),
                         g_rt.vk_driver.using_turnip ? 1 : 0,
@@ -216,7 +230,8 @@ Java_com_mobiro_runtime_MainActivity_nativeConfigureAndValidate(
             static_cast<uint64_t>(getpid()), static_cast<uint64_t>(gettid()))) {
         return env->NewStringUTF("Failed to initialize Win64 TEB/PEB.");
     }
-    g_rt.box64.set_main_teb(g_rt.main_thread_env.teb);
+    g_rt.box64.set_main_thread_env(&g_rt.main_thread_env);
+    mobiro::cpu::GuestExecutor::run_tls_callbacks(g_rt.pe_image, g_rt.main_thread_env);
 
     g_rt.configured.store(true, std::memory_order_release);
     __android_log_print(ANDROID_LOG_INFO, kLogTag,

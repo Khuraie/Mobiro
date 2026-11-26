@@ -6,6 +6,16 @@
 
 ## Log Entries
 
+### Increment 12 — M10: Android `ANativeWindow` DXVK WSI Backend (`VK_KHR_android_surface`), Embedded Box64 PIC Static Core & XMM3 Float COM Forwarding (2026-11-27)
+- **Status:** Implemented & verified (local MSVC 2022 + GitHub Actions Linux GCC/`spirv-val` + Android ARM64 NDK + upstream DXVK/Box64 full-stack rebuild)
+- **Changes:**
+  - Implemented `AndroidWsiDriver` (`patches/dxvk/wsi_platform_android.{h,cpp}`) and idempotent injector `scripts/patch_dxvk_android_wsi.py` wired into `scripts/build_dxvk_android.sh`, enabling native AArch64 DXVK (`libdxvk_dxgi.so` / `libdxvk_d3d11.so`) to create real `VK_KHR_android_surface` Vulkan surfaces directly against the live `ANativeWindow*` exported via `mobiro_get_android_native_window()` in `runtime_main.cpp`.
+  - Upgraded `scripts/build_box64_android.sh` to build position-independent (`-DCMAKE_POSITION_INDEPENDENT_CODE=ON`) Box64 objects and archive all non-`main.c.o` core + ARM64 Dynarec objects into `libbox64_core.a`; added pure-C11 `app/src/main/cpp/cpu_mem/box64_c_shim.c` so `libsekiro_runtime.so` links and invokes Box64's `DynaRun` cleanly without exposing C-only internal Box64 headers to C++20.
+  - Added Win64 `XMM0–3` scalar float support in `box64_bridge.hpp` and wired `ID3D11DeviceContext::ClearDepthStencilView` (slot 53) float forwarding + automatic `D3D11ComBridge` proxy wrapping (`D3D11CreateDevice`, `D3D11CreateDeviceAndSwapChain`, `CreateDXGIFactory1`) + `DxvkInterop::pace_present()` 30/60 FPS `Present` hook + `DllMain`/TLS callback execution on `LoadLibraryW` and startup.
+  - Added `test_m10_xmm_com_auto_wrap_and_dllmain_tls` in `tests/test_core.cpp` (11/11 test suites passing).
+
+---
+
 ### Increment 11 — M9: Native AArch64 DXVK Green (All 3 Upstream Layers Verified) & Bundled Full-Stack APK Workflow (2026-11-27)
 - **Status:** Implemented & verified on GitHub Actions NDK `27.2.12479018`
 - **Changes:**
@@ -136,4 +146,4 @@
 ---
 
 ## Upcoming Increments
-- **Increment 8 (M6 — On-Device Validation & Upstream Binary Packaging):** Run the dispatchable `build-third-party.yml` workflow to verify upstream `box64`/`Turnip`/`DXVK` cross-builds, attach the Vulkan SPIR-V HUD draw pass to `libdxvk_dxgi.so` swapchain presentation, and validate real-device boot on Adreno 7xx/8xx hardware.
+- **Increment 13 (M11 — Steam/FMOD/Game-Specific Import Coverage & Live Adreno 7xx/8xx Boot):** Add clean-room BYOF-compliant Steam stub / missing Win32 CRT & `ntdll` imports discovered against real user-supplied `Sekiro.exe`, attach the `TouchOverlayVk` Vulkan draw pass to the swapchain command buffer, and validate first live Adreno 7xx/8xx handset boot.

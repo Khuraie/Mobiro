@@ -500,7 +500,7 @@ void test_dxvk_interop_and_ms_x64_marshaling() {
     interop.set_target_fps(60);
 
     mobiro::mem::GuestArena arena;
-    assert(arena.reserve(0x0000000100000000ULL, 64ULL * 1024 * 1024));
+    assert(arena.reserve(0x0000000100000000ULL, 128ULL * 1024 * 1024));
     mobiro::validator::VfsMapper vfs;
     mobiro::cpu::Box64Bridge bridge;
     assert(bridge.initialize(&arena, &vfs));
@@ -592,7 +592,7 @@ void test_vfs_write_overlay_threads_wait_and_audio() {
     assert(!vfs.resolve_for_write("..\\..\\evil.txt", escaped));
 
     mobiro::mem::GuestArena arena;
-    assert(arena.reserve(0x0000000100000000ULL, 64ULL * 1024 * 1024));
+    assert(arena.reserve(0x0000000100000000ULL, 128ULL * 1024 * 1024));
     mobiro::cpu::Box64Bridge bridge;
     assert(bridge.initialize(&arena, &vfs));
 
@@ -768,7 +768,7 @@ void test_touch_controller_and_cache_warmer() {
 void test_xaudio2_com_and_touch_overlay_vk() {
     // 1. IXAudio2 COM vtable dispatch -> PCM16 & mono float32 -> AAudioXAudioBridge
     mobiro::mem::GuestArena arena;
-    assert(arena.reserve(0x0000000100000000ULL, 64ULL * 1024 * 1024));
+    assert(arena.reserve(0x0000000100000000ULL, 128ULL * 1024 * 1024));
     mobiro::validator::VfsMapper vfs;
     mobiro::cpu::Box64Bridge bridge;
     assert(bridge.initialize(&arena, &vfs));
@@ -1168,7 +1168,7 @@ void test_d3d11_com_bridge_ext_win32_and_hud_draw() {
 
     // 3. Extended Win32 shims (MultiByteToWideChar, GlobalMemoryStatusEx, EncodePointer, DirectInput8)
     mobiro::mem::GuestArena arena;
-    assert(arena.reserve(0x0000000100000000ULL, 64ULL * 1024 * 1024));
+    assert(arena.reserve(0x0000000100000000ULL, 128ULL * 1024 * 1024));
     mobiro::validator::VfsMapper vfs;
     mobiro::cpu::Box64Bridge bridge;
     assert(bridge.initialize(&arena, &vfs));
@@ -1205,6 +1205,140 @@ void test_d3d11_com_bridge_ext_win32_and_hud_draw() {
     bridge.shutdown();
 }
 
+void test_m10_xmm_com_auto_wrap_and_dllmain_tls() {
+    // 1. D3D11CreateDevice auto-wraps native DXVK objects into ComProxyObjects & forwards XMM3 float to ClearDepthStencilView
+    struct FakeD3DContext {
+        const void* const* vtbl;
+        void* last_dsv;
+        uint32_t last_flags;
+        float last_depth;
+        uint8_t last_stencil;
+        uint32_t refs;
+    };
+    struct FakeD3DDevice {
+        const void* const* vtbl;
+        uint32_t refs;
+    };
+    static void* fake_dev_vtbl[mobiro::gfx::d3d11_abi::D3D11DeviceSlots::kSlotCount]{};
+    fake_dev_vtbl[2] = reinterpret_cast<void*>(+[](void* self) -> uint64_t {
+        return --static_cast<FakeD3DDevice*>(self)->refs;
+    });
+    static void* fake_ctx_vtbl[mobiro::gfx::d3d11_abi::D3D11DeviceContextSlots::kSlotCount]{};
+    fake_ctx_vtbl[2] = reinterpret_cast<void*>(+[](void* self) -> uint64_t {
+        return --static_cast<FakeD3DContext*>(self)->refs;
+    });
+    fake_ctx_vtbl[mobiro::gfx::d3d11_abi::D3D11DeviceContextSlots::kClearDepthStencilView] =
+        reinterpret_cast<void*>(+[](void* self, void* dsv, uint32_t flags, float depth, uint8_t stencil) {
+            auto* ctx = static_cast<FakeD3DContext*>(self);
+            ctx->last_dsv = dsv;
+            ctx->last_flags = flags;
+            ctx->last_depth = depth;
+            ctx->last_stencil = stencil;
+        });
+
+    static FakeD3DDevice nat_dev{fake_dev_vtbl, 1};
+    static FakeD3DContext nat_ctx{fake_ctx_vtbl, nullptr, 0, 0.0f, 0, 1};
+    nat_dev.refs = 1;
+    nat_ctx = {fake_ctx_vtbl, nullptr, 0, 0.0f, 0, 1};
+
+    auto& com = mobiro::gfx::D3D11ComBridge::global();
+    com.clear();
+    auto& dxvk = mobiro::gfx::DxvkInterop::global();
+    mobiro::gfx::DxvkBackendTable tbl{};
+    tbl.d3d11_create_device = [](void*, uint32_t, void*, uint32_t, const uint32_t*, uint32_t,
+                                 uint32_t, void** out_dev, uint32_t* out_fl, void** out_ctx) -> int32_t {
+        if (out_dev) *out_dev = &nat_dev;
+        if (out_fl) *out_fl = 0xB000;
+        if (out_ctx) *out_ctx = &nat_ctx;
+        return 0;
+    };
+    dxvk.set_backend_override(tbl, /*auto_wrap_com=*/true);
+
+    mobiro::mem::GuestArena arena;
+    assert(arena.reserve(0x0000000100000000ULL, 128ULL * 1024 * 1024));
+    mobiro::validator::VfsMapper vfs;
+    mobiro::cpu::Box64Bridge bridge;
+    assert(bridge.initialize(&arena, &vfs));
+
+    void* guest_dev = nullptr;
+    void* guest_ctx = nullptr;
+    uint32_t fl = 0;
+    uint64_t stack[12]{};
+    stack[5 + 3] = reinterpret_cast<uint64_t>(&guest_dev);
+    stack[5 + 4] = reinterpret_cast<uint64_t>(&fl);
+    stack[5 + 5] = reinterpret_cast<uint64_t>(&guest_ctx);
+
+    x64emu_t emu{};
+    emu.rdx = 1; // D3D_DRIVER_TYPE_HARDWARE
+    emu.rsp = reinterpret_cast<uint64_t>(stack);
+    assert(bridge.invoke_thunk("d3d11.dll", "D3D11CreateDevice", &emu));
+    assert(emu.rax == 0 && guest_dev != nullptr && guest_ctx != nullptr && fl == 0xB000);
+    assert(com.active_proxy_count() == 2);
+
+    // Call ID3D11DeviceContext::ClearDepthStencilView (slot 53) via proxy with XMM3 = 0.875f & Stencil = 0x5A
+    auto* ctx_proxy = static_cast<mobiro::gfx::ComProxyObject*>(guest_ctx);
+    const auto* cdsv_stub = reinterpret_cast<const mobiro::cpu::NativeBridgeStub*>(
+        ctx_proxy->lpVtbl[mobiro::gfx::d3d11_abi::D3D11DeviceContextSlots::kClearDepthStencilView]);
+    int fake_dsv_marker = 7;
+    uint64_t cdsv_stack[8]{};
+    cdsv_stack[5] = 0x5A; // Stencil (5th arg on Win64 stack)
+    emu = {};
+    emu.rcx = reinterpret_cast<uint64_t>(ctx_proxy);
+    emu.rdx = reinterpret_cast<uint64_t>(&fake_dsv_marker);
+    emu.r8  = 3; // D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL
+    mobiro::cpu::emu_set_xmm_f32(&emu, 3, 0.875f);
+    emu.rsp = reinterpret_cast<uint64_t>(cdsv_stack);
+    reinterpret_cast<mobiro::cpu::NativeThunkFn>(cdsv_stub->thunk_ptr)(&emu);
+    assert(nat_ctx.last_dsv == &fake_dsv_marker);
+    assert(nat_ctx.last_flags == 3);
+    assert(std::abs(nat_ctx.last_depth - 0.875f) < 1e-6f);
+    assert(nat_ctx.last_stencil == 0x5A);
+
+    // Release both proxies -> auto-reclaimed
+    auto release_proxy = [](void* p) {
+        auto* pr = static_cast<mobiro::gfx::ComProxyObject*>(p);
+        const auto* st = reinterpret_cast<const mobiro::cpu::NativeBridgeStub*>(pr->lpVtbl[2]);
+        x64emu_t e{}; e.rcx = reinterpret_cast<uint64_t>(pr);
+        reinterpret_cast<mobiro::cpu::NativeThunkFn>(st->thunk_ptr)(&e);
+        assert(e.rax == 0);
+    };
+    release_proxy(guest_ctx);
+    release_proxy(guest_dev);
+    assert(com.active_proxy_count() == 0);
+    dxvk.set_backend_override({});
+
+    // 2. TLS callback execution + DllMain invocation on LoadLibraryW when main_thread_env is active
+    mobiro::cpu::Win64ThreadEnv tenv;
+    assert(tenv.init_main_thread(arena, 0x140000000ULL, 8, 1000, 1));
+    bridge.set_main_thread_env(&tenv);
+
+    // Build a 1-instruction guest TLS callback (MOV RAX, 0x7777; RET) in guest arena
+    const uintptr_t tls_mem = arena.virtual_alloc(0, 4096, mobiro::mem::kProtRead | mobiro::mem::kProtWrite | mobiro::mem::kProtExec, true);
+    assert(tls_mem != 0);
+    uint8_t cb_code[] = {
+        0x48, 0xB8, 0x77, 0x77, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov rax, 0x7777
+        0xC3                                                        // ret
+    };
+    std::memcpy(reinterpret_cast<void*>(tls_mem + 0x100), cb_code, sizeof(cb_code));
+    uint64_t cb_list[2] = { tls_mem + 0x100, 0 };
+    std::memcpy(reinterpret_cast<void*>(tls_mem + 0x80), cb_list, sizeof(cb_list));
+    uint64_t cb_list_va = tls_mem + 0x80;
+    std::memcpy(reinterpret_cast<void*>(tls_mem + 0x18), &cb_list_va, 8); // AddressOfCallBacks
+
+    mobiro::cpu::LoadedPeImage fake_tls_img{};
+    fake_tls_img.ok = true;
+    fake_tls_img.mapped_base = tls_mem;
+    fake_tls_img.tls_dir_va = tls_mem;
+    assert(mobiro::cpu::GuestExecutor::run_tls_callbacks(fake_tls_img, tenv) == 1);
+
+    // Frame pacer resets and paces cleanly without hanging
+    dxvk.reset_pacer();
+    dxvk.set_target_fps(60);
+    dxvk.pace_present();
+
+    bridge.shutdown();
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1229,6 +1363,7 @@ int main(int argc, char** argv) {
     test_xaudio2_com_and_touch_overlay_vk();
     test_module_loader_and_headless_win32_ui();
     test_d3d11_com_bridge_ext_win32_and_hud_draw();
+    test_m10_xmm_com_auto_wrap_and_dllmain_tls();
     std::cout << "All Mobiro core unit tests passed.\n";
     return 0;
 }

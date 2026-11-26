@@ -84,25 +84,17 @@ public:
         return proxies_.size();
     }
 
-    // Invokes a COM vtable slot directly from a Win64 x64emu_t register + stack frame
+    // Invokes a COM vtable slot directly from a Win64 x64emu_t register + XMM + stack frame
     template <size_t Slot>
     static void dispatch_slot(x64emu_t* emu) {
         if (!emu) return;
-#ifdef MOBIRO_HAVE_BOX64
-        uint64_t& rax = emu->regs[_AX].q[0];
-        const uint64_t rcx = emu->regs[_CX].q[0];
-        const uint64_t rdx = emu->regs[_DX].q[0];
-        const uint64_t r8  = emu->regs[_R8].q[0];
-        const uint64_t r9  = emu->regs[_R9].q[0];
-        const auto* sp = reinterpret_cast<const uint64_t*>(emu->regs[_SP].q[0]);
-#else
-        uint64_t& rax = emu->rax;
-        const uint64_t rcx = emu->rcx;
-        const uint64_t rdx = emu->rdx;
-        const uint64_t r8  = emu->r8;
-        const uint64_t r9  = emu->r9;
-        const auto* sp = reinterpret_cast<const uint64_t*>(emu->rsp);
-#endif
+        uint64_t& rax = cpu::emu_reg_rax(emu);
+        const uint64_t rcx = cpu::emu_reg_rcx(emu);
+        const uint64_t rdx = cpu::emu_reg_rdx(emu);
+        const uint64_t r8  = cpu::emu_reg_r8(emu);
+        const uint64_t r9  = cpu::emu_reg_r9(emu);
+        const auto* sp = reinterpret_cast<const uint64_t*>(cpu::emu_reg_rsp(emu));
+
         auto& self = global();
         ComProxyObject* proxy = self.find_proxy(static_cast<uintptr_t>(rcx));
         if (!proxy || !proxy->native_obj) {
@@ -135,6 +127,21 @@ public:
             }
         }
 
+        // Handle ID3D11DeviceContext::ClearDepthStencilView (slot 53) scalar float Depth in XMM3
+        if constexpr (Slot == d3d11_abi::D3D11DeviceContextSlots::kClearDepthStencilView) {
+            if (proxy->iface == d3d11_abi::ComIfaceId::D3D11DeviceContext) {
+                using ClearDsvFn = void (*)(void*, void*, uint32_t, float, uint8_t);
+                auto fn = reinterpret_cast<ClearDsvFn>(native_vtbl[Slot]);
+                void* dsv = reinterpret_cast<void*>(self.unwrap_arg(rdx));
+                const uint32_t clear_flags = static_cast<uint32_t>(r8);
+                const float depth = cpu::emu_xmm_f32(emu, 3);
+                const uint8_t stencil = sp ? static_cast<uint8_t>(sp[5] & 0xFFu) : 0u;
+                fn(proxy->native_obj, dsv, clear_flags, depth, stencil);
+                rax = 0ULL;
+                return;
+            }
+        }
+
         const uint64_t a1 = self.unwrap_arg(rdx);
         const uint64_t a2 = self.unwrap_arg(r8);
         const uint64_t a3 = self.unwrap_arg(r9);
@@ -145,9 +152,7 @@ public:
         const uint64_t a8 = sp ? self.unwrap_arg(sp[9]) : 0;
         const uint64_t a9 = sp ? self.unwrap_arg(sp[10]) : 0;
 
-        // Forward up to 10 pointer/integer arguments cleanly to native AAPCS64/host COM method.
-        // shortcut: methods taking floating-point registers (e.g. RSSetViewports uses pointer, only
-        // ClearDepthStencilView/OMSetBlendState take scalar floats) need XMM0..3 forwarding when Box64 links.
+        // Forward up to 10 pointer/integer arguments to native AAPCS64/host COM method.
         using NativeFn = uint64_t (*)(void*, uint64_t, uint64_t, uint64_t, uint64_t,
                                       uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
         auto fn = reinterpret_cast<NativeFn>(native_vtbl[Slot]);

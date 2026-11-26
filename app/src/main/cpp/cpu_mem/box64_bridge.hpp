@@ -10,20 +10,33 @@
 #include "../validator/vfs_mapper.hpp"
 
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <unordered_map>
 
 #ifdef MOBIRO_HAVE_BOX64
 extern "C" {
-#include "box64context.h"
-#include "x64emu.h"
+typedef struct x64emu_s x64emu_t;
+uint64_t* mobiro_box64_reg_ptr(x64emu_t* emu, int reg_id);
+float mobiro_box64_xmm_f32(const x64emu_t* emu, int xmm_idx);
+uintptr_t mobiro_box64_teb(const x64emu_t* emu);
+int mobiro_box64_call_fn(uintptr_t fn_va,
+                         uint64_t rcx,
+                         uint64_t rdx,
+                         uint64_t r8,
+                         uintptr_t stack_base,
+                         uint32_t stack_size,
+                         uintptr_t teb_va,
+                         uint64_t return_sentinel,
+                         uint64_t* out_rax);
 }
 #else
-// Minimal ABI-compatible register frame used when building without the upstream Box64 submodule
+// Minimal ABI-compatible register frame used when building without the upstream Box64 static core
 struct MobiroX64Emu {
     uint64_t rax = 0, rcx = 0, rdx = 0, rbx = 0;
     uint64_t rsp = 0, rbp = 0, rsi = 0, rdi = 0;
     uint64_t r8 = 0, r9 = 0, r10 = 0, r11 = 0;
+    uint64_t xmm[4] = {}; // Low 64 bits of XMM0..XMM3 (Win64 scalar float/double args)
     uint64_t rip = 0;
     uint64_t gs_base = 0; // Win64 TEB pointer
 };
@@ -31,6 +44,77 @@ using x64emu_t = MobiroX64Emu;
 #endif
 
 namespace mobiro::cpu {
+
+// Unified Win64 register & XMM accessors (works identically with Box64 C shim and host tests)
+inline uint64_t& emu_reg_rax(x64emu_t* e) {
+#ifdef MOBIRO_HAVE_BOX64
+    return *mobiro_box64_reg_ptr(e, 0);
+#else
+    return e->rax;
+#endif
+}
+inline uint64_t emu_reg_rcx(const x64emu_t* e) {
+#ifdef MOBIRO_HAVE_BOX64
+    return *mobiro_box64_reg_ptr(const_cast<x64emu_t*>(e), 1);
+#else
+    return e->rcx;
+#endif
+}
+inline uint64_t emu_reg_rdx(const x64emu_t* e) {
+#ifdef MOBIRO_HAVE_BOX64
+    return *mobiro_box64_reg_ptr(const_cast<x64emu_t*>(e), 2);
+#else
+    return e->rdx;
+#endif
+}
+inline uint64_t emu_reg_rsp(const x64emu_t* e) {
+#ifdef MOBIRO_HAVE_BOX64
+    return *mobiro_box64_reg_ptr(const_cast<x64emu_t*>(e), 4);
+#else
+    return e->rsp;
+#endif
+}
+inline uint64_t emu_reg_r8(const x64emu_t* e) {
+#ifdef MOBIRO_HAVE_BOX64
+    return *mobiro_box64_reg_ptr(const_cast<x64emu_t*>(e), 8);
+#else
+    return e->r8;
+#endif
+}
+inline uint64_t emu_reg_r9(const x64emu_t* e) {
+#ifdef MOBIRO_HAVE_BOX64
+    return *mobiro_box64_reg_ptr(const_cast<x64emu_t*>(e), 9);
+#else
+    return e->r9;
+#endif
+}
+inline float emu_xmm_f32(const x64emu_t* e, int idx) {
+    if (!e || idx < 0 || idx >= 4) return 0.0f;
+#ifdef MOBIRO_HAVE_BOX64
+    return mobiro_box64_xmm_f32(e, idx);
+#else
+    float f = 0.0f;
+    uint32_t bits = static_cast<uint32_t>(e->xmm[idx] & 0xFFFFFFFFu);
+    std::memcpy(&f, &bits, sizeof(f));
+    return f;
+#endif
+}
+#ifndef MOBIRO_HAVE_BOX64
+inline void emu_set_xmm_f32(x64emu_t* e, int idx, float v) {
+    if (!e || idx < 0 || idx >= 4) return;
+    uint32_t bits = 0;
+    std::memcpy(&bits, &v, sizeof(bits));
+    e->xmm[idx] = bits;
+}
+#endif
+inline uintptr_t emu_teb_va(const x64emu_t* e) {
+    if (!e) return 0;
+#ifdef MOBIRO_HAVE_BOX64
+    return mobiro_box64_teb(e);
+#else
+    return static_cast<uintptr_t>(e->gs_base);
+#endif
+}
 
 using NativeThunkFn = void (*)(x64emu_t* emu);
 
@@ -83,6 +167,11 @@ public:
     uintptr_t main_module_base() const { return main_module_base_; }
     void set_main_teb(Win64Teb* teb) { main_teb_ = teb; }
     Win64Teb* main_teb() const { return main_teb_; }
+    void set_main_thread_env(const Win64ThreadEnv* tenv) {
+        main_thread_env_ = tenv;
+        if (tenv && tenv->teb) main_teb_ = tenv->teb;
+    }
+    const Win64ThreadEnv* main_thread_env() const { return main_thread_env_; }
     uint32_t alloc_tls_slot() {
         uint32_t idx = next_tls_slot_++;
         return (idx < 64) ? idx : 0xFFFFFFFFu;
@@ -105,6 +194,7 @@ private:
     win32::HeadlessWindowState window_;
     uintptr_t main_module_base_ = 0;
     Win64Teb* main_teb_ = nullptr;
+    const Win64ThreadEnv* main_thread_env_ = nullptr;
     uint32_t next_tls_slot_ = 0;
     NativeBridgeStub* stub_pool_ = nullptr;
     size_t stub_count_ = 0;

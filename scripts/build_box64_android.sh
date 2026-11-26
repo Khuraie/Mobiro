@@ -26,6 +26,7 @@ cmake -S "$BOX64_SRC" -B "$BUILD_DIR" -G Ninja \
   -DANDROID_ABI=arm64-v8a \
   -DANDROID_PLATFORM=android-31 \
   -DANDROID_STL=c++_shared \
+  -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
   -DARM_DYNAREC=ON \
   -DANDROID=ON \
   -DBAD_SIGNAL=ON \
@@ -33,8 +34,24 @@ cmake -S "$BOX64_SRC" -B "$BUILD_DIR" -G Ninja \
 
 cmake --build "$BUILD_DIR" --parallel
 
-mkdir -p "$OUT_DIR/include" "$OUT_DIR/lib"
+mkdir -p "$OUT_DIR/include/emu" "$OUT_DIR/lib"
 cp -a "$BOX64_SRC/src/include/." "$OUT_DIR/include/"
-find "$BUILD_DIR" -maxdepth 2 \( -name "libbox64*.a" -o -name "box64" \) -exec cp -a {} "$OUT_DIR/lib/" \;
+cp -a "$BOX64_SRC/src/emu/"*.h "$OUT_DIR/include/emu/"
+if [ -f "$BUILD_DIR/box64" ]; then
+  cp -f "$BUILD_DIR/box64" "$OUT_DIR/lib/box64_cli"
+fi
+
+# Package position-independent Box64 core + ARM64 Dynarec objects (excluding main.c.o) into libbox64_core.a
+LLVM_AR="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+mapfile -t BOX64_OBJS < <(find "$BUILD_DIR/CMakeFiles" -type f -name "*.o" \
+  ! -name "main.c.o" \
+  ! -path "*/test_interpreter.dir/*" \
+  ! -path "*CompilerId*" \
+  ! -path "*/CMakeTmp/*" | sort)
+if [ "${#BOX64_OBJS[@]}" -gt 0 ] && [ -x "$LLVM_AR" ]; then
+  rm -f "$OUT_DIR/lib/libbox64_core.a"
+  "$LLVM_AR" rcs "$OUT_DIR/lib/libbox64_core.a" "${BOX64_OBJS[@]}"
+  echo "[Mobiro] Archived ${#BOX64_OBJS[@]} objects into $OUT_DIR/lib/libbox64_core.a"
+fi
 
 echo "[Mobiro] Built Box64 arm64-v8a artifacts into $OUT_DIR"
