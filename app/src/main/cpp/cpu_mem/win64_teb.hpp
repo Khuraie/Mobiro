@@ -96,6 +96,42 @@ struct Win64ThreadEnv {
         teb->tls_array_ptr = reinterpret_cast<uintptr_t>(&teb->tls_slots[0]);
         return true;
     }
+
+    // Worker threads only need their own TEB + stack (never duplicate a 16 MB process heap).
+    bool init_worker_thread(mem::GuestArena& arena,
+                            uintptr_t image_base,
+                            uint32_t cpu_count,
+                            uint64_t pid,
+                            uint64_t tid,
+                            size_t stack_size = 512 * 1024) {
+        const uintptr_t ctrl_va = arena.virtual_alloc(
+            0, 65536, mem::kProtRead | mem::kProtWrite, true);
+        if (!ctrl_va) return false;
+
+        const uintptr_t stack_va = arena.virtual_alloc(
+            0, stack_size, mem::kProtRead | mem::kProtWrite, true);
+        if (!stack_va) return false;
+
+        peb = reinterpret_cast<Win64Peb*>(ctrl_va);
+        teb = reinterpret_cast<Win64Teb*>(ctrl_va + 4096);
+        std::memset(peb, 0, sizeof(Win64Peb));
+        std::memset(teb, 0, sizeof(Win64Teb));
+
+        peb->image_base_address = image_base;
+        peb->number_of_processors = cpu_count ? cpu_count : 8;
+
+        stack_limit = stack_va;
+        stack_base = stack_va + stack_size;
+
+        teb->stack_base = stack_base;
+        teb->stack_limit = stack_limit;
+        teb->self_ptr = reinterpret_cast<uintptr_t>(teb);
+        teb->unique_process = pid;
+        teb->unique_thread = tid;
+        teb->peb_ptr = reinterpret_cast<uintptr_t>(peb);
+        teb->tls_array_ptr = reinterpret_cast<uintptr_t>(&teb->tls_slots[0]);
+        return true;
+    }
 };
 
 } // namespace mobiro::cpu

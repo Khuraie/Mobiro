@@ -6,7 +6,19 @@
 
 ## Log Entries
 
+### Increment 7 — M5: `IXAudio2` COM Voice Vtables, Vulkan Touch HUD Vertex Packer & CI Artifact / Upstream Build Workflows (2026-11-27)
+- **Status:** Implemented & verified (local MSVC 2022 + GitHub Actions Linux GCC & Android ARM64 NDK)
+- **Changes:**
+  - Implemented Win64 binary-compatible `IXAudio2` / `IXAudio2Voice` / `IXAudio2SourceVoice` COM vtables (`app/src/main/cpp/audio/xaudio2_com.hpp`) supporting `CreateMasteringVoice`, `CreateSourceVoice` (PCM16 and IEEE float32, mono upmix & stereo, per-voice volume gain), `SubmitSourceBuffer` feeding `AAudioXAudioBridge`, `Start`/`Stop`, `GetState`, and `IUnknown` refcounting; wired `thunk_XAudio2Create` in `win32_shim.cpp` to return real COM objects.
+  - Implemented `TouchOverlayVk` (`app/src/main/cpp/gfx/touch_overlay_vk.hpp`) converting `TouchController` screen-space quads into tightly packed Vulkan NDC triangle vertices (24B/vertex) with automatic hide/show switching between physical controllers and touchscreen in `runtime_main.cpp`.
+  - Updated `.github/workflows/ci.yml` (`actions/checkout@v5`) to publish `mobiro-arm64-debug-apk` (`app-debug.apk`) as a downloadable artifact on every CI run.
+  - Added dispatchable `.github/workflows/build-third-party.yml` to cross-compile upstream open-source Box64, Mesa Turnip (`libvulkan_freedreno.so`), and native AArch64 DXVK (`libdxvk_{d3d11,dxgi}.so`) for `arm64-v8a` on demand.
+  - Added `test_xaudio2_com_and_touch_overlay_vk` in `tests/test_core.cpp`, forced `#undef NDEBUG` so Release CI builds execute every `assert(...)`, and fixed a worker-thread VA leak (`Win64ThreadEnv::init_worker_thread` no longer allocates a redundant 16 MB process heap per `CreateThread`).
+
+---
+
 ### Increment 6 — M4: Persistent Save Storage, Multi-Touch XInput Controller + HUD Quads & Pipeline Cache Pre-Warmer (2026-11-27)
+- **Commit:** `cb8d8cc` (CI Run `45858840945` — Linux GCC tests 17s, Android ARM64 APK 1m17s)
 - **Status:** Implemented & verified (local MSVC 2022 + GitHub Actions Linux GCC & Android ARM64 NDK)
 - **Changes:**
   - Separated persistent `filesDir/saves_overlay` from `cacheDir` across `MainActivity.kt` and `runtime_main.cpp` so Android's cache eviction never deletes Sekiro save games.
@@ -79,4 +91,4 @@
 ---
 
 ## Upcoming Increments
-- **Increment 7 (M5 — Real Hardware Bring-Up):** Add optional workflow/packaging job to build & bundle upstream `box64` (`arm64-v8a`), `libvulkan_freedreno.so` (Turnip), and `libdxvk_{d3d11,dxgi}.so`, implement `IXAudio2` COM voice vtables, and validate first real-device boot with an Adreno 7xx/8xx handset.
+- **Increment 8 (M6 — On-Device Validation & Upstream Binary Packaging):** Run the dispatchable `build-third-party.yml` workflow to verify upstream `box64`/`Turnip`/`DXVK` cross-builds, attach the Vulkan SPIR-V HUD draw pass to `libdxvk_dxgi.so` swapchain presentation, and validate real-device boot on Adreno 7xx/8xx hardware.

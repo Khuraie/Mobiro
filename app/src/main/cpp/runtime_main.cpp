@@ -6,6 +6,7 @@
 #include "gfx/dxvk_config_gen.hpp"
 #include "gfx/dxvk_interop.hpp"
 #include "gfx/pipeline_cache_warmer.hpp"
+#include "gfx/touch_overlay_vk.hpp"
 #include "gfx/turnip_loader.hpp"
 #include "input/input_router.hpp"
 #include "input/touch_controller.hpp"
@@ -35,6 +36,7 @@ struct MobiroRuntimeState {
     mobiro::cpu::Win64ThreadEnv main_thread_env;
     mobiro::gfx::VulkanDriverHandle vk_driver;
     mobiro::gfx::PipelineCacheWarmer cache_warmer;
+    mobiro::gfx::TouchOverlayVk touch_overlay;
     mobiro::input::TouchController touch_ctrl;
     mobiro::sched::ThreadBalancer balancer;
     std::atomic<int> target_fps{60};
@@ -76,6 +78,7 @@ void process_game_activity_input(android_app* app) {
     for (uint64_t i = 0; i < buf->motionEventsCount; ++i) {
         const auto& ev = buf->motionEvents[i];
         if ((ev.source & AINPUT_SOURCE_JOYSTICK) == AINPUT_SOURCE_JOYSTICK && ev.pointerCount > 0) {
+            g_rt.touch_overlay.set_enabled(false); // Auto-hide touch HUD when physical controller is active
             const auto& ptr = ev.pointers[0];
             float lx = GameActivityPointerAxes_getAxisValue(&ptr, AMOTION_EVENT_AXIS_X);
             float ly = -GameActivityPointerAxes_getAxisValue(&ptr, AMOTION_EVENT_AXIS_Y);
@@ -87,6 +90,7 @@ void process_game_activity_input(android_app* app) {
             router.set_right_stick(rx, ry);
             router.set_triggers(lt, rt);
         } else if ((ev.source & AINPUT_SOURCE_TOUCHSCREEN) == AINPUT_SOURCE_TOUCHSCREEN && ev.pointerCount > 0) {
+            g_rt.touch_overlay.set_enabled(true);
             const int32_t masked = ev.action & AMOTION_EVENT_ACTION_MASK;
             const int32_t idx = (ev.action & AMOTION_EVENT_ACTION_POINTER_INDEX_MASK)
                                 >> AMOTION_EVENT_ACTION_POINTER_INDEX_SHIFT;
@@ -175,6 +179,7 @@ Java_com_mobiro_runtime_MainActivity_nativeConfigureAndValidate(
 
     // 4. Load Mesa Turnip ICD (with graceful fallback to system Vulkan) + native AArch64 DXVK
     g_rt.vk_driver = mobiro::gfx::load_vulkan_driver(lib_dir);
+    g_rt.touch_overlay.attach_vulkan_loader(g_rt.vk_driver.get_instance_proc_addr);
     const bool dxvk_loaded = mobiro::gfx::DxvkInterop::global().load_native_libraries(lib_dir);
     __android_log_print(ANDROID_LOG_INFO, kLogTag, "Vulkan ICD loaded: %s (turnip=%d, dxvk_native=%d)",
                         g_rt.vk_driver.loaded_path.c_str(),

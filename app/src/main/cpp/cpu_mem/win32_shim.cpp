@@ -1,5 +1,5 @@
 #include "box64_bridge.hpp"
-#include "../audio/aaudio_xaudio_bridge.hpp"
+#include "../audio/xaudio2_com.hpp"
 #include "../gfx/dxvk_interop.hpp"
 #include "../input/input_router.hpp"
 
@@ -311,17 +311,8 @@ void thunk_WakeByAddressAll(x64emu_t* emu) {
 
 void thunk_XAudio2Create(x64emu_t* emu) {
     auto** out_xa2 = reinterpret_cast<void**>(reg_rcx(emu));
-    if (!out_xa2) {
-        reg_rax(emu) = 0x80070057ULL; // E_INVALIDARG
-        return;
-    }
-    auto& bridge = mobiro::audio::AAudioXAudioBridge::global();
-    if (!bridge.start(48000, 2)) {
-        reg_rax(emu) = 0x80004005ULL; // E_FAIL
-        return;
-    }
-    *out_xa2 = &bridge;
-    reg_rax(emu) = 0ULL; // S_OK
+    const int32_t hr = mobiro::audio::create_xaudio2_com(out_xa2);
+    reg_rax(emu) = static_cast<uint64_t>(static_cast<uint32_t>(hr));
 }
 
 // --- Error state, SystemInfo & SEH Unwind ---

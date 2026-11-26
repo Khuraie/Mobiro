@@ -1,4 +1,6 @@
+#undef NDEBUG
 #include "audio/aaudio_xaudio_bridge.hpp"
+#include "audio/xaudio2_com.hpp"
 #include "cpu_mem/box64_bridge.hpp"
 #include "cpu_mem/guest_arena.hpp"
 #include "cpu_mem/guest_executor.hpp"
@@ -7,6 +9,7 @@
 #include "gfx/dxvk_config_gen.hpp"
 #include "gfx/dxvk_interop.hpp"
 #include "gfx/pipeline_cache_warmer.hpp"
+#include "gfx/touch_overlay_vk.hpp"
 #include "input/input_router.hpp"
 #include "input/touch_controller.hpp"
 #include "sched/thread_balancer.hpp"
@@ -250,6 +253,7 @@ void test_pe_loader_teb_and_win32_thunks() {
     // 3. Test VFS-backed Win32 CreateFileW + GetFileSizeEx + ReadFile (OVERLAPPED) + CloseHandle
     const uint16_t wpath[] = {'C', ':', '\\', 'D', 'a', 't', 'a', '0', '.', 'b', 'd', 't', 0};
     emu.rcx = reinterpret_cast<uint64_t>(wpath);
+    emu.rdx = 0x80000000u; // GENERIC_READ
     assert(bridge.invoke_thunk("kernel32.dll", "CreateFileW", &emu));
     const uint64_t hfile = emu.rax;
     assert(hfile != mobiro::win32::FileHandleTable::kInvalidHandle);
@@ -685,6 +689,8 @@ void test_vfs_write_overlay_threads_wait_and_audio() {
     emu.rcx = reinterpret_cast<uint64_t>(&xa2_ptr);
     assert(bridge.invoke_thunk("xaudio2_7.dll", "XAudio2Create", &emu));
     assert(emu.rax == 0 && xa2_ptr != nullptr);
+    auto* xa2_com = static_cast<mobiro::audio::IXAudio2Com*>(xa2_ptr);
+    assert(xa2_com->lpVtbl->Release(xa2_com) == 0);
 
     auto& audio = mobiro::audio::AAudioXAudioBridge::global();
     assert(audio.is_running());
@@ -755,6 +761,111 @@ void test_touch_controller_and_cache_warmer() {
     fs::remove_all(cache_root);
 }
 
+void test_xaudio2_com_and_touch_overlay_vk() {
+    // 1. IXAudio2 COM vtable dispatch -> PCM16 & mono float32 -> AAudioXAudioBridge
+    mobiro::mem::GuestArena arena;
+    assert(arena.reserve(0x0000000100000000ULL, 64ULL * 1024 * 1024));
+    mobiro::validator::VfsMapper vfs;
+    mobiro::cpu::Box64Bridge bridge;
+    assert(bridge.initialize(&arena, &vfs));
+
+    void* xa2_raw = nullptr;
+    x64emu_t emu{};
+    emu.rcx = reinterpret_cast<uint64_t>(&xa2_raw);
+    assert(bridge.invoke_thunk("xaudio2_9.dll", "XAudio2Create", &emu));
+    assert(emu.rax == 0 && xa2_raw != nullptr);
+
+    auto* xa2 = static_cast<mobiro::audio::IXAudio2Com*>(xa2_raw);
+    assert(xa2->lpVtbl->AddRef(xa2) == 2);
+
+    void* master_raw = nullptr;
+    assert(xa2->lpVtbl->CreateMasteringVoice(xa2, &master_raw, 2, 48000, 0, nullptr, nullptr, 0) == 0);
+    assert(master_raw != nullptr);
+    auto* master = static_cast<mobiro::audio::IXAudio2VoiceCom*>(master_raw);
+
+    mobiro::audio::WaveFormatEx fmt{};
+    fmt.format_tag = 1; // WAVE_FORMAT_PCM
+    fmt.channels = 2;
+    fmt.samples_per_sec = 48000;
+    fmt.bits_per_sample = 16;
+    fmt.block_align = 4;
+    fmt.avg_bytes_per_sec = 192000;
+
+    void* src_raw = nullptr;
+    assert(xa2->lpVtbl->CreateSourceVoice(xa2, &src_raw, &fmt, 0, 2.0f, nullptr, nullptr, nullptr) == 0);
+    assert(src_raw != nullptr);
+    auto* src = static_cast<mobiro::audio::IXAudio2SourceVoiceCom*>(src_raw);
+    assert(src->lpVtbl->base.SetVolume(src, 0.5f, 0) == 0);
+    assert(src->lpVtbl->Start(src, 0, 0) == 0);
+
+    const int16_t pcm16[4] = {16384, -16384, 32767, -32768};
+    int ctx_tag = 42;
+    mobiro::audio::XAudio2Buffer xbuf{};
+    xbuf.audio_bytes = sizeof(pcm16);
+    xbuf.audio_data = reinterpret_cast<const uint8_t*>(pcm16);
+    xbuf.context = &ctx_tag;
+    assert(src->lpVtbl->SubmitSourceBuffer(src, &xbuf, nullptr) == 0);
+
+    mobiro::audio::XAudio2VoiceState vst{};
+    src->lpVtbl->GetState(src, &vst, 0);
+    assert(vst.samples_played == 2 && vst.current_buffer_context == &ctx_tag);
+
+    float out[4]{};
+    auto& aaudio = mobiro::audio::AAudioXAudioBridge::global();
+    assert(aaudio.drain_pcm_float(out, 4) == 4);
+    assert(std::abs(out[0] - 0.25f) < 1e-3f);
+    assert(std::abs(out[1] + 0.25f) < 1e-3f);
+    assert(std::abs(out[2] - 0.50f) < 1e-3f);
+    assert(std::abs(out[3] + 0.50f) < 1e-3f);
+
+    // Mono IEEE float32 upmix -> stereo
+    mobiro::audio::WaveFormatEx mono_flt{};
+    mono_flt.format_tag = 3; // WAVE_FORMAT_IEEE_FLOAT
+    mono_flt.channels = 1;
+    mono_flt.samples_per_sec = 48000;
+    mono_flt.bits_per_sample = 32;
+    mono_flt.block_align = 4;
+    void* mono_raw = nullptr;
+    assert(xa2->lpVtbl->CreateSourceVoice(xa2, &mono_raw, &mono_flt, 0, 2.0f, nullptr, nullptr, nullptr) == 0);
+    auto* mono = static_cast<mobiro::audio::IXAudio2SourceVoiceCom*>(mono_raw);
+    const float mono_sample[1] = {0.75f};
+    mobiro::audio::XAudio2Buffer mbuf{};
+    mbuf.audio_bytes = sizeof(mono_sample);
+    mbuf.audio_data = reinterpret_cast<const uint8_t*>(mono_sample);
+    assert(mono->lpVtbl->SubmitSourceBuffer(mono, &mbuf, nullptr) == 0);
+    float stereo_out[2]{};
+    assert(aaudio.drain_pcm_float(stereo_out, 2) == 2);
+    assert(std::abs(stereo_out[0] - 0.75f) < 1e-5f && std::abs(stereo_out[1] - 0.75f) < 1e-5f);
+
+    mono->lpVtbl->base.DestroyVoice(mono);
+    src->lpVtbl->base.DestroyVoice(src);
+    master->lpVtbl->DestroyVoice(master);
+    assert(xa2->lpVtbl->Release(xa2) == 1);
+    assert(xa2->lpVtbl->Release(xa2) == 0);
+    aaudio.stop();
+    bridge.shutdown();
+
+    // 2. TouchOverlayVk: 12 quads -> 72 NDC vertices, auto-hides when controller disables overlay
+    mobiro::input::InputRouter router;
+    mobiro::input::TouchController tc;
+    tc.set_viewport(1920.0f, 1080.0f);
+    tc.on_pointer(1, mobiro::input::TouchAction::Down, 300.0f, 700.0f, router);
+    auto quads = tc.build_hud_quads();
+    assert(quads.size() == 12);
+
+    mobiro::gfx::TouchOverlayVk overlay;
+    assert(overlay.pack_quads(quads) == 72);
+    assert(overlay.vertex_bytes() == 72 * sizeof(mobiro::gfx::HudVertex));
+    for (const auto& v : overlay.vertices()) {
+        assert(v.x >= -1.0f && v.x <= 1.0f);
+        assert(v.y >= -1.0f && v.y <= 1.0f);
+        assert(v.a >= 0.0f && v.a <= 1.0f);
+    }
+
+    overlay.set_enabled(false);
+    assert(overlay.pack_quads(quads) == 0);
+}
+
 } // namespace
 
 int main() {
@@ -765,6 +876,7 @@ int main() {
     test_dxvk_interop_and_ms_x64_marshaling();
     test_vfs_write_overlay_threads_wait_and_audio();
     test_touch_controller_and_cache_warmer();
+    test_xaudio2_com_and_touch_overlay_vk();
     std::cout << "All Mobiro core unit tests passed.\n";
     return 0;
 }

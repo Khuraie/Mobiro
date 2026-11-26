@@ -1,0 +1,63 @@
+name: Build Upstream ARM64 Native Components
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_box64:
+        description: "Build upstream Box64 (arm64-v8a)"
+        type: boolean
+        default: true
+      build_turnip:
+        description: "Build upstream Mesa Turnip ICD (libvulkan_freedreno.so)"
+        type: boolean
+        default: true
+      build_dxvk:
+        description: "Build upstream native AArch64 DXVK (libdxvk_d3d11.so / libdxvk_dxgi.so)"
+        type: boolean
+        default: false
+
+jobs:
+  build-upstream-arm64:
+    name: Cross-Compile Upstream Open-Source Binaries (arm64-v8a)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install NDK & Cross-Build Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build meson pkg-config bison flex python3-mako python3-yaml glslang-tools
+          SDKMGR="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMGR" --licenses > /dev/null 2>&1 || true
+          "$SDKMGR" "ndk;27.2.12479018" "cmake;3.22.1"
+
+      - name: Fetch Open-Source Upstream Repos
+        run: bash scripts/fetch_third_party.sh
+
+      - name: Build Box64 (arm64-v8a)
+        if: ${{ inputs.build_box64 }}
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
+        run: bash scripts/build_box64_android.sh
+
+      - name: Build Mesa Turnip ICD (arm64-v8a)
+        if: ${{ inputs.build_turnip }}
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
+        run: bash scripts/build_turnip_android.sh
+
+      - name: Build Native DXVK (arm64-v8a)
+        if: ${{ inputs.build_dxvk }}
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
+        run: bash scripts/build_dxvk_android.sh
+
+      - name: Upload Built ARM64 Native Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobiro-upstream-arm64-libs
+          path: |
+            third_party/prebuilt/arm64-v8a/**
+            app/src/main/jniLibs/arm64-v8a/*.so
+          if-no-files-found: warn
+          retention-days: 14

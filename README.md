@@ -72,7 +72,8 @@ See [PROGRESS.md](PROGRESS.md) for the live engineering log of every verified in
 - [x] **M2 — Native AArch64 DXVK + Turnip Interop & Build Pipeline:** Implemented `DxvkInterop` (`ANativeWindow` lifecycle + `30/60 FPS` pacing + `dlopen` native DXVK loader), full MS-x64 10/12-arg `D3D11CreateDevice`/`D3D11CreateDeviceAndSwapChain`/`CreateDXGIFactory1` marshaling, and Meson cross-build scripts (`scripts/build_turnip_android.sh`, `scripts/build_dxvk_android.sh`).
 - [x] **M3 — Win32 Save Overlay, `CreateThread`/`WaitOnAddress` & `AAudio` Bridge:** Copy-on-write save-game VFS overlay (`WriteFile`/`FlushFileBuffers`), `CreateThread` with per-thread TEB + `ThreadBalancer` binding, `WaitOnAddress`/`WakeByAddress`, and `XAudio2Create` → lock-free `AAudio` stereo PCM bridge.
 - [x] **M4 — Multi-Touch XInput Controller, HUD Quads & Pipeline Cache Pre-Warmer:** Zero-debounce Sekiro combat multi-touch controller (`TouchController`), in-swapchain `HudQuad` geometry generator, persistent `filesDir/saves_overlay` separation, and Efficiency-core `PipelineCacheWarmer` with stale cache pruning.
-- [ ] **M5 — Real-Device Bring-Up (Upstream Binary Integration):** Package source-built `arm64-v8a` Box64 + Mesa Turnip + native DXVK (`ANativeWindow` WSI) + `IXAudio2` COM voice vtables and test on Adreno 7xx/8xx hardware.
+- [x] **M5 — `IXAudio2` COM Voices, Vulkan Touch HUD Packing & Upstream CI Packaging:** Win64 `IXAudio2`/`IXAudio2SourceVoice` COM vtables (PCM16 + float32 -> `AAudio`), `TouchOverlayVk` NDC triangle packer with controller auto-hide, CI `app-debug.apk` artifact upload, and dispatchable `.github/workflows/build-third-party.yml` for upstream `box64`/Turnip/DXVK `arm64-v8a` builds.
+- [ ] **M6 — On-Device Validation & Upstream Binary Packaging:** Execute upstream cross-build pipeline, bind in-swapchain Vulkan SPIR-V HUD draw pass to `libdxvk_dxgi.so`, and validate real-device boot on Adreno 7xx/8xx hardware.
 
 ---
 

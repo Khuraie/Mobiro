@@ -110,7 +110,7 @@ public:
         auto rec = std::make_shared<ThreadRec>();
         const uint32_t tid = next_tid_.fetch_add(1);
         rec->tid = tid;
-        if (!rec->env.init_main_thread(*arena, image_base, 8, 1000, tid, 512 * 1024)) {
+        if (!rec->env.init_worker_thread(*arena, image_base, 8, 1000, tid, 512 * 1024)) {
             return 0;
         }
 
