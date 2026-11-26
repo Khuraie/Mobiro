@@ -1,6 +1,7 @@
 // Pure C11 shim insulating Mobiro's C++20 runtime from upstream Box64 internal C headers.
 #include "box64context.h"
 #include "box64cpu.h"
+#include "env.h"
 #include "x64emu.h"
 #include "emu/x64emu_private.h"
 
@@ -36,6 +37,8 @@ static pthread_once_t g_box64_ctx_once = PTHREAD_ONCE_INIT;
 
 static void mobiro_init_box64_context_once(void) {
     if (!my_context) {
+        // Must parse BOX64_DYNAREC* env vars before NewBox64Context since main.c.o is excluded
+        LoadEnvVariables();
         my_context = NewBox64Context(0);
     }
 }

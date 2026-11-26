@@ -1968,6 +1968,74 @@ void test_m15_segregated_heap_sharded_sync_and_parallel_io() {
     fs::remove_all(tmp);
 }
 
+void test_m16_init_once_slist_time_query_and_xinput_caps() {
+    mobiro::mem::GuestArena arena;
+    assert(arena.reserve(0x0000000100000000ULL, 128ULL * 1024 * 1024));
+    mobiro::validator::VfsMapper vfs;
+    mobiro::cpu::Box64Bridge bridge;
+    assert(bridge.initialize(&arena, &vfs));
+
+    // 1. SList push/pop/depth/flush (MSVC CRT & FromSoft lock-free pools)
+    alignas(16) uint64_t slist_hdr[2]{};
+    alignas(16) uint64_t node_a[2]{}, node_b[2]{};
+    x64emu_t emu{};
+    emu.rcx = reinterpret_cast<uint64_t>(slist_hdr);
+    assert(bridge.invoke_thunk("kernel32.dll", "InitializeSListHead", &emu));
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>(slist_hdr); emu.rdx = reinterpret_cast<uint64_t>(node_a);
+    assert(bridge.invoke_thunk("kernel32.dll", "InterlockedPushEntrySList", &emu) && emu.rax == 0);
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>(slist_hdr); emu.rdx = reinterpret_cast<uint64_t>(node_b);
+    assert(bridge.invoke_thunk("ntdll.dll", "RtlInterlockedPushEntrySList", &emu) &&
+           emu.rax == reinterpret_cast<uint64_t>(node_a));
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>(slist_hdr);
+    assert(bridge.invoke_thunk("kernel32.dll", "QueryDepthSList", &emu) && emu.rax == 2);
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>(slist_hdr);
+    assert(bridge.invoke_thunk("kernel32.dll", "InterlockedPopEntrySList", &emu) &&
+           emu.rax == reinterpret_cast<uint64_t>(node_b));
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>(slist_hdr);
+    assert(bridge.invoke_thunk("kernel32.dll", "InterlockedFlushSList", &emu) &&
+           emu.rax == reinterpret_cast<uint64_t>(node_a));
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>(slist_hdr);
+    assert(bridge.invoke_thunk("kernel32.dll", "QueryDepthSList", &emu) && emu.rax == 0);
+
+    // 2. InitOnceBeginInitialize / InitOnceComplete (MSVC std::call_once)
+    uint64_t once = 0;
+    uint32_t pending = 0;
+    void* out_ctx = nullptr;
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>(&once); emu.rdx = 0;
+    emu.r8 = reinterpret_cast<uint64_t>(&pending); emu.r9 = reinterpret_cast<uint64_t>(&out_ctx);
+    assert(bridge.invoke_thunk("kernel32.dll", "InitOnceBeginInitialize", &emu) && emu.rax == 1 && pending == 1);
+
+    int sentinel_ctx = 99;
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>(&once); emu.rdx = 0;
+    emu.r8 = reinterpret_cast<uint64_t>(&sentinel_ctx);
+    assert(bridge.invoke_thunk("kernel32.dll", "InitOnceComplete", &emu) && emu.rax == 1);
+
+    pending = 1;
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>(&once); emu.rdx = 0;
+    emu.r8 = reinterpret_cast<uint64_t>(&pending); emu.r9 = reinterpret_cast<uint64_t>(&out_ctx);
+    assert(bridge.invoke_thunk("kernel32.dll", "InitOnceBeginInitialize", &emu) &&
+           emu.rax == 1 && pending == 0 && out_ctx == &sentinel_ctx);
+
+    // 3. GetLocalTime, VirtualQuery, GetUserDefaultLCID, XInputGetCapabilities
+    uint16_t st[8]{};
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>(st);
+    assert(bridge.invoke_thunk("kernel32.dll", "GetLocalTime", &emu) && st[0] >= 2024 && st[1] >= 1 && st[1] <= 12);
+
+    uint64_t mbi[6]{};
+    emu = {}; emu.rcx = 0x100001234ULL; emu.rdx = reinterpret_cast<uint64_t>(mbi); emu.r8 = sizeof(mbi);
+    assert(bridge.invoke_thunk("kernel32.dll", "VirtualQuery", &emu) && emu.rax == 48 && mbi[0] == 0x100001000ULL);
+
+    emu = {};
+    assert(bridge.invoke_thunk("kernel32.dll", "GetUserDefaultLCID", &emu) && emu.rax == 0x0409ULL);
+
+    uint8_t xcaps[20]{};
+    emu = {}; emu.rcx = 0; emu.rdx = 1; emu.r8 = reinterpret_cast<uint64_t>(xcaps);
+    assert(bridge.invoke_thunk("xinput1_4.dll", "XInputGetCapabilities", &emu) &&
+           emu.rax == 0 && xcaps[0] == 1 && xcaps[1] == 1);
+
+    bridge.shutdown();
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1998,6 +2066,7 @@ int main(int argc, char** argv) {
     test_m13_com_out_param_wrapping_and_array_unwrapping();
     test_m14_lockfree_com_pool_pacer_and_native_crt_mem();
     test_m15_segregated_heap_sharded_sync_and_parallel_io();
+    test_m16_init_once_slist_time_query_and_xinput_caps();
     std::cout << "All Mobiro core unit tests passed.\n";
     return 0;
 }

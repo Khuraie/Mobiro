@@ -70,7 +70,33 @@ def main() -> int:
         "DXVK_WSI_ANDROID",
     )
 
-    print(f"[Mobiro] Patched DXVK Android ANativeWindow WSI in {dxvk}")
+    # Inject in-swapchain Mobiro TouchOverlayVk HUD renderer into DxvkSwapchainBlitter
+    dxvk_core_dir = dxvk / "src" / "dxvk"
+    for fname in ("mobiro_touch_hud.h", "mobiro_touch_hud.cpp"):
+        shutil.copy2(root / "patches" / "dxvk" / fname, dxvk_core_dir / fname)
+
+    insert_after(
+        dxvk_core_dir / "meson.build",
+        "    'dxvk_swapchain_blitter.cpp',\n",
+        "    'mobiro_touch_hud.cpp',\n",
+        "mobiro_touch_hud.cpp",
+    )
+
+    insert_after(
+        dxvk_core_dir / "dxvk_swapchain_blitter.cpp",
+        '#include "dxvk_swapchain_blitter.h"\n',
+        '#include "mobiro_touch_hud.h"\n',
+        "mobiro_touch_hud.h",
+    )
+
+    insert_after(
+        dxvk_core_dir / "dxvk_swapchain_blitter.cpp",
+        "      if (m_cursorView)\n        renderCursor(ctx, dstView);\n    }",
+        "\n    {\n      static MobiroTouchHud s_mobiroTouchHud;\n      s_mobiroTouchHud.render(m_device, ctx, dstView);\n    }",
+        "s_mobiroTouchHud",
+    )
+
+    print(f"[Mobiro] Patched DXVK Android ANativeWindow WSI + Touch HUD in {dxvk}")
     return 0
 
 

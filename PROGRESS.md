@@ -6,6 +6,16 @@
 
 ## Log Entries
 
+### Increment 18 — M16: Box64 `LoadEnvVariables()` Dynarec Activation, Live DXVK In-Swapchain Touch HUD Renderer & Sekiro CRT/SList/InitOnce Shims (2026-11-27)
+- **Status:** Implemented & verified (local MSVC 2022 + GitHub Actions Linux GCC/`spirv-val` + Android ARM64 NDK)
+- **Changes:**
+  - Fixed a critical embedded-Box64 Dynarec initialization gap in `app/src/main/cpp/cpu_mem/box64_c_shim.c`: included upstream `env.h` and called `LoadEnvVariables()` inside `mobiro_init_box64_context_once()` before `NewBox64Context(0)` (since `libbox64_core.a` excludes `main.c.o`), ensuring `BOX64_DYNAREC=1` + `BIGBLOCK=3`/`CALLRET=1`/`STRONGMEM=1` actually take effect at runtime.
+  - Implemented DXVK in-swapchain touch HUD renderer `patches/dxvk/mobiro_touch_hud.{h,cpp}` and injected it via `scripts/patch_dxvk_android_wsi.py` into `DxvkSwapchainBlitter` (inside the active `VK_KHR_dynamic_rendering` swapchain pass — zero extra render passes or Adreno GMEM copies), lazily creating the alpha-blended Vulkan 1.0 SPIR-V pipeline & 64 KiB host-coherent VBO and binding `mobiro_touch_overlay_*` via `dlsym(RTLD_DEFAULT)`.
+  - Added 25+ Sekiro / MSVC 2017 CRT / Oodle / Bink2 Win32 shims in `win32_shim.cpp`: `InitializeSListHead`/`Interlocked{Push,Pop,Flush}EntrySList`/`QueryDepthSList` (`kernel32` + `ntdll`), `InitOnce{Initialize,BeginInitialize,Complete}` (`std::call_once`), `GetLocalTime`/`GetSystemTime`, `GetTickCount`, `GetFileInformationByHandle`, `SetEndOfFile`, `VirtualQuery`, `GetUserDefault{LCID,UILanguage}`, processor-query helpers, and `XInputGetCapabilities`.
+  - Added `test_m16_init_once_slist_time_query_and_xinput_caps` in `tests/test_core.cpp` (17/17 test suites passing).
+
+---
+
 ### Increment 17 — M15: O(1) Segregated GuestHeap, 64-Shard Lock Tables, Parallel File I/O & In-Swapchain HUD C ABI Exports (2026-11-27)
 - **Status:** Implemented & verified (local MSVC 2022 + GitHub Actions Linux GCC/`spirv-val` + Android ARM64 NDK)
 - **Changes:**

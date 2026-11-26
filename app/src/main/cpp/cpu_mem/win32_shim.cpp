@@ -9,6 +9,7 @@
 
 #include <chrono>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <random>
 #include <thread>
@@ -1189,6 +1190,190 @@ void thunk_strncmp(x64emu_t* emu) {
     reg_rax(emu) = static_cast<uint64_t>(static_cast<int64_t>(cmp));
 }
 
+// --- M16: Sekiro / MSVC CRT / Oodle / Bink2 InitOnce, SList, Time, Query & XInputCaps shims ---
+
+std::mutex g_slist_mu;
+
+void thunk_InitializeSListHead(x64emu_t* emu) {
+    auto* hdr = reinterpret_cast<uint64_t*>(reg_rcx(emu));
+    if (hdr) { hdr[0] = 0; hdr[1] = 0; }
+    reg_rax(emu) = 0ULL;
+}
+
+void thunk_InterlockedPushEntrySList(x64emu_t* emu) {
+    auto* hdr = reinterpret_cast<uint64_t*>(reg_rcx(emu));
+    auto* entry = reinterpret_cast<uint64_t*>(reg_rdx(emu));
+    if (!hdr || !entry) { reg_rax(emu) = 0ULL; return; }
+    std::lock_guard<std::mutex> lk(g_slist_mu);
+    const uint64_t prev = hdr[0];
+    entry[0] = prev;
+    hdr[0] = reinterpret_cast<uint64_t>(entry);
+    ++hdr[1];
+    reg_rax(emu) = prev;
+}
+
+void thunk_InterlockedPopEntrySList(x64emu_t* emu) {
+    auto* hdr = reinterpret_cast<uint64_t*>(reg_rcx(emu));
+    if (!hdr) { reg_rax(emu) = 0ULL; return; }
+    std::lock_guard<std::mutex> lk(g_slist_mu);
+    auto* head = reinterpret_cast<uint64_t*>(hdr[0]);
+    if (!head) { reg_rax(emu) = 0ULL; return; }
+    hdr[0] = head[0];
+    if (hdr[1] > 0) --hdr[1];
+    reg_rax(emu) = reinterpret_cast<uint64_t>(head);
+}
+
+void thunk_InterlockedFlushSList(x64emu_t* emu) {
+    auto* hdr = reinterpret_cast<uint64_t*>(reg_rcx(emu));
+    if (!hdr) { reg_rax(emu) = 0ULL; return; }
+    std::lock_guard<std::mutex> lk(g_slist_mu);
+    const uint64_t head = hdr[0];
+    hdr[0] = 0;
+    hdr[1] = 0;
+    reg_rax(emu) = head;
+}
+
+void thunk_QueryDepthSList(x64emu_t* emu) {
+    auto* hdr = reinterpret_cast<const uint64_t*>(reg_rcx(emu));
+    if (!hdr) { reg_rax(emu) = 0ULL; return; }
+    std::lock_guard<std::mutex> lk(g_slist_mu);
+    reg_rax(emu) = hdr[1] & 0xFFFFULL;
+}
+
+std::mutex g_init_once_mu;
+std::condition_variable g_init_once_cv;
+
+void thunk_InitOnceInitialize(x64emu_t* emu) {
+    auto* once = reinterpret_cast<uint64_t*>(reg_rcx(emu));
+    if (once) *once = 0ULL;
+    reg_rax(emu) = 0ULL;
+}
+
+// BOOL InitOnceBeginInitialize(LPINIT_ONCE, DWORD dwFlags, PBOOL fPending, LPVOID* lpContext)
+void thunk_InitOnceBeginInitialize(x64emu_t* emu) {
+    auto* once = reinterpret_cast<uint64_t*>(reg_rcx(emu));
+    const uint32_t flags = static_cast<uint32_t>(reg_rdx(emu));
+    auto* pending = reinterpret_cast<uint32_t*>(reg_r8(emu));
+    auto** ctx = reinterpret_cast<void**>(reg_r9(emu));
+    if (!once || !pending) { reg_rax(emu) = 0ULL; return; }
+
+    std::unique_lock<std::mutex> lk(g_init_once_mu);
+    while ((*once & 3ULL) == 1ULL) { // in-progress
+        if (flags & 1u) { *pending = 0; reg_rax(emu) = 0ULL; return; } // INIT_ONCE_CHECK_ONLY
+        g_init_once_cv.wait(lk);
+    }
+    if ((*once & 3ULL) == 2ULL) { // completed
+        *pending = 0;
+        if (ctx) *ctx = reinterpret_cast<void*>(*once & ~3ULL);
+        reg_rax(emu) = 1ULL;
+        return;
+    }
+    if (flags & 1u) { *pending = 0; reg_rax(emu) = 0ULL; return; }
+    *once = 1ULL;
+    *pending = 1;
+    reg_rax(emu) = 1ULL;
+}
+
+// BOOL InitOnceComplete(LPINIT_ONCE, DWORD dwFlags, LPVOID lpContext)
+void thunk_InitOnceComplete(x64emu_t* emu) {
+    auto* once = reinterpret_cast<uint64_t*>(reg_rcx(emu));
+    const uint32_t flags = static_cast<uint32_t>(reg_rdx(emu));
+    const uint64_t ctx = reg_r8(emu);
+    if (!once) { reg_rax(emu) = 0ULL; return; }
+    {
+        std::lock_guard<std::mutex> lk(g_init_once_mu);
+        if (flags & 4u) { // INIT_ONCE_INIT_FAILED
+            *once = 0ULL;
+        } else {
+            *once = (ctx & ~3ULL) | 2ULL;
+        }
+    }
+    g_init_once_cv.notify_all();
+    reg_rax(emu) = 1ULL;
+}
+
+void thunk_GetSystemOrLocalTime(x64emu_t* emu) {
+    auto* st = reinterpret_cast<uint16_t*>(reg_rcx(emu));
+    if (!st) { reg_rax(emu) = 0ULL; return; }
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t tt = std::chrono::system_clock::to_time_t(now);
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000;
+    std::tm tm_val{};
+#if defined(_WIN32)
+    gmtime_s(&tm_val, &tt);
+#else
+    gmtime_r(&tt, &tm_val);
+#endif
+    st[0] = static_cast<uint16_t>(tm_val.tm_year + 1900);
+    st[1] = static_cast<uint16_t>(tm_val.tm_mon + 1);
+    st[2] = static_cast<uint16_t>(tm_val.tm_wday);
+    st[3] = static_cast<uint16_t>(tm_val.tm_mday);
+    st[4] = static_cast<uint16_t>(tm_val.tm_hour);
+    st[5] = static_cast<uint16_t>(tm_val.tm_min);
+    st[6] = static_cast<uint16_t>(tm_val.tm_sec);
+    st[7] = static_cast<uint16_t>(ms < 0 ? 0 : ms);
+    reg_rax(emu) = 0ULL;
+}
+
+void thunk_GetTickCount32(x64emu_t* emu) {
+    thunk_GetTickCount64(emu);
+    reg_rax(emu) &= 0xFFFFFFFFULL;
+}
+
+void thunk_GetFileInformationByHandle(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    const uint64_t h = reg_rcx(emu);
+    auto* info = reinterpret_cast<uint8_t*>(reg_rdx(emu));
+    if (!b || !info) { reg_rax(emu) = 0ULL; return; }
+    int64_t sz = 0;
+    if (!b->files().get_file_size(h, &sz)) { reg_rax(emu) = 0ULL; return; }
+    std::memset(info, 0, 52);
+    const uint32_t attrs = 0x80u; // FILE_ATTRIBUTE_NORMAL
+    const uint32_t sz_hi = static_cast<uint32_t>(static_cast<uint64_t>(sz) >> 32);
+    const uint32_t sz_lo = static_cast<uint32_t>(static_cast<uint64_t>(sz) & 0xFFFFFFFFULL);
+    const uint32_t nlinks = 1u;
+    std::memcpy(info + 0, &attrs, 4);
+    std::memcpy(info + 32, &sz_hi, 4);
+    std::memcpy(info + 36, &sz_lo, 4);
+    std::memcpy(info + 40, &nlinks, 4);
+    reg_rax(emu) = 1ULL;
+}
+
+void thunk_VirtualQuery(x64emu_t* emu) {
+    const uint64_t addr = reg_rcx(emu) & ~0xFFFULL;
+    auto* mbi = reinterpret_cast<uint64_t*>(reg_rdx(emu));
+    const size_t len = static_cast<size_t>(reg_r8(emu));
+    if (!mbi || len < 48) { reg_rax(emu) = 0ULL; return; }
+    std::memset(mbi, 0, 48);
+    mbi[0] = addr;             // BaseAddress
+    mbi[1] = addr;             // AllocationBase
+    mbi[2] = 0x04ULL;          // AllocationProtect = PAGE_READWRITE
+    mbi[3] = 0x10000ULL;       // RegionSize (64 KiB)
+    const uint32_t state = 0x1000u;   // MEM_COMMIT
+    const uint32_t prot  = 0x04u;     // PAGE_READWRITE
+    const uint32_t type  = 0x20000u;  // MEM_PRIVATE
+    auto* mbi32 = reinterpret_cast<uint32_t*>(mbi + 4);
+    mbi32[0] = state;
+    mbi32[1] = prot;
+    mbi32[2] = type;
+    reg_rax(emu) = 48ULL;
+}
+
+void thunk_GetLocaleEnUs(x64emu_t* emu) { reg_rax(emu) = 0x0409ULL; } // en-US LCID / LANGID
+
+void thunk_XInputGetCapabilities(x64emu_t* emu) {
+    const uint32_t user_idx = static_cast<uint32_t>(reg_rcx(emu));
+    auto* caps = reinterpret_cast<uint8_t*>(reg_r8(emu));
+    if (user_idx != 0 || !caps) {
+        reg_rax(emu) = 1167ULL; // ERROR_DEVICE_NOT_CONNECTED
+        return;
+    }
+    std::memset(caps, 0, 20);
+    caps[0] = 1u; // XINPUT_DEVTYPE_GAMEPAD
+    caps[1] = 1u; // XINPUT_DEVSUBTYPE_GAMEPAD
+    reg_rax(emu) = 0ULL; // ERROR_SUCCESS
+}
+
 // --- Input ---
 
 void thunk_XInputGetState(x64emu_t* emu) {
@@ -1667,6 +1852,35 @@ void Box64Bridge::register_default_win32_thunks() {
     register_thunk("kernel32.dll", "RtlMoveMemory", &thunk_memmove);
     register_thunk("kernel32.dll", "RtlZeroMemory", &thunk_RtlZeroMemory);
     register_thunk("kernel32.dll", "RtlFillMemory", &thunk_RtlFillMemory);
+
+    // M16: InitOnce (MSVC std::call_once), SList, Time/Locale, VirtualQuery, FileInfo & XInputCaps
+    register_thunk("kernel32.dll", "InitializeSListHead", &thunk_InitializeSListHead);
+    register_thunk("kernel32.dll", "InterlockedPushEntrySList", &thunk_InterlockedPushEntrySList);
+    register_thunk("kernel32.dll", "InterlockedPopEntrySList", &thunk_InterlockedPopEntrySList);
+    register_thunk("kernel32.dll", "InterlockedFlushSList", &thunk_InterlockedFlushSList);
+    register_thunk("kernel32.dll", "QueryDepthSList", &thunk_QueryDepthSList);
+    register_thunk("ntdll.dll", "RtlInitializeSListHead", &thunk_InitializeSListHead);
+    register_thunk("ntdll.dll", "RtlInterlockedPushEntrySList", &thunk_InterlockedPushEntrySList);
+    register_thunk("ntdll.dll", "RtlInterlockedPopEntrySList", &thunk_InterlockedPopEntrySList);
+    register_thunk("ntdll.dll", "RtlInterlockedFlushSList", &thunk_InterlockedFlushSList);
+    register_thunk("ntdll.dll", "RtlQueryDepthSList", &thunk_QueryDepthSList);
+    register_thunk("kernel32.dll", "InitOnceInitialize", &thunk_InitOnceInitialize);
+    register_thunk("kernel32.dll", "InitOnceBeginInitialize", &thunk_InitOnceBeginInitialize);
+    register_thunk("kernel32.dll", "InitOnceComplete", &thunk_InitOnceComplete);
+    register_thunk("kernel32.dll", "GetSystemTime", &thunk_GetSystemOrLocalTime);
+    register_thunk("kernel32.dll", "GetLocalTime", &thunk_GetSystemOrLocalTime);
+    register_thunk("kernel32.dll", "GetTickCount", &thunk_GetTickCount32);
+    register_thunk("kernel32.dll", "GetFileInformationByHandle", &thunk_GetFileInformationByHandle);
+    register_thunk("kernel32.dll", "SetEndOfFile", &thunk_ReturnTrue);
+    register_thunk("kernel32.dll", "VirtualQuery", &thunk_VirtualQuery);
+    register_thunk("kernel32.dll", "GetUserDefaultLCID", &thunk_GetLocaleEnUs);
+    register_thunk("kernel32.dll", "GetUserDefaultUILanguage", &thunk_GetLocaleEnUs);
+    register_thunk("kernel32.dll", "GetCurrentProcessorNumber", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "SetThreadIdealProcessor", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "GetLogicalProcessorInformation", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "GetLogicalProcessorInformationEx", &thunk_ReturnZero);
+    register_thunk("xinput1_4.dll", "XInputGetCapabilities", &thunk_XInputGetCapabilities);
+    register_thunk("xinput1_3.dll", "XInputGetCapabilities", &thunk_XInputGetCapabilities);
 }
 
 } // namespace mobiro::cpu
