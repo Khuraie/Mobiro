@@ -86,7 +86,6 @@ struct IXAudio2SourceVoiceVtbl {
 };
 
 // Win64 COM vtable for IXAudio2 (XAudio2.9 slot layout; 13 slots)
-// shortcut: XAudio2.7 has 2 extra device-enum slots before CreateSourceVoice; split vtable if legacy 2.7 path is hit.
 struct IXAudio2Vtbl {
     int32_t  (*QueryInterface)(void* self, const void* riid, void** ppv);
     uint32_t (*AddRef)(void* self);
@@ -102,6 +101,32 @@ struct IXAudio2Vtbl {
     int32_t  (*CreateMasteringVoice)(
         void* self, void** pp_voice, uint32_t in_ch, uint32_t in_rate,
         uint32_t flags, const void* device_id, const void* fx_chain, uint32_t stream_cat);
+    int32_t  (*StartEngine)(void* self);
+    void     (*StopEngine)(void* self);
+    int32_t  (*CommitChanges)(void* self, uint32_t op_set);
+    void     (*GetPerformanceData)(void* self, void* out_perf);
+    void     (*SetDebugConfiguration)(void* self, const void* cfg, void* reserved);
+};
+
+// Win64 COM vtable for legacy XAudio2.7 (adds GetDeviceCount, GetDeviceDetails, Initialize)
+struct IXAudio2_7Vtbl {
+    int32_t  (*QueryInterface)(void* self, const void* riid, void** ppv);
+    uint32_t (*AddRef)(void* self);
+    uint32_t (*Release)(void* self);
+    int32_t  (*GetDeviceCount)(void* self, uint32_t* out_count);
+    int32_t  (*GetDeviceDetails)(void* self, uint32_t index, void* out_details);
+    int32_t  (*Initialize)(void* self, uint32_t flags, uint32_t processor);
+    int32_t  (*RegisterForCallbacks)(void* self, void* cb);
+    void     (*UnregisterForCallbacks)(void* self, void* cb);
+    int32_t  (*CreateSourceVoice)(
+        void* self, void** pp_voice, const WaveFormatEx* fmt,
+        uint32_t flags, float max_freq_ratio, void* cb, const void* send_list, const void* fx_chain);
+    int32_t  (*CreateSubmixVoice)(
+        void* self, void** pp_voice, uint32_t in_ch, uint32_t in_rate,
+        uint32_t flags, uint32_t stage, const void* send_list, const void* fx_chain);
+    int32_t  (*CreateMasteringVoice)(
+        void* self, void** pp_voice, uint32_t in_ch, uint32_t in_rate,
+        uint32_t flags, uint32_t device_index, const void* fx_chain);
     int32_t  (*StartEngine)(void* self);
     void     (*StopEngine)(void* self);
     int32_t  (*CommitChanges)(void* self, uint32_t op_set);
@@ -129,6 +154,12 @@ struct IXAudio2SourceVoiceCom {
 
 struct IXAudio2Com {
     const IXAudio2Vtbl* lpVtbl = nullptr;
+    std::atomic<uint32_t> ref_count{1};
+    AAudioXAudioBridge* bridge = nullptr;
+};
+
+struct IXAudio2_7Com {
+    const IXAudio2_7Vtbl* lpVtbl = nullptr;
     std::atomic<uint32_t> ref_count{1};
     AAudioXAudioBridge* bridge = nullptr;
 };
@@ -205,8 +236,7 @@ inline int32_t source_set_rate(void* self, uint32_t rate) {
     return 0;
 }
 
-// Converts PCM16 or IEEE float32 (mono or stereo) into stereo float32 and pushes into AAudioXAudioBridge.
-// shortcut: no sample-rate resampling yet; add linear/sinc resampler if non-48kHz Sekiro SFX voices appear.
+// Converts PCM16 or IEEE float32 (mono or stereo), linearly resamples if needed, and pushes into AAudioXAudioBridge.
 inline int32_t source_submit_buffer(void* self, const XAudio2Buffer* buf, const void*) {
     if (!self || !buf || !buf->audio_data || buf->audio_bytes == 0) {
         return static_cast<int32_t>(0x80070057u); // E_INVALIDARG
@@ -256,7 +286,26 @@ inline int32_t source_submit_buffer(void* self, const XAudio2Buffer* buf, const 
     }
 
     if (v->bridge && !stereo.empty()) {
-        v->bridge->submit_pcm_float(stereo.data(), stereo.size());
+        const uint32_t src_rate = v->format.samples_per_sec ? v->format.samples_per_sec : 48000u;
+        const uint32_t dst_rate = static_cast<uint32_t>(v->bridge->sample_rate() > 0 ? v->bridge->sample_rate() : 48000);
+        if (src_rate != dst_rate) {
+            const size_t src_frames = stereo.size() / 2;
+            const size_t dst_frames = std::max<size_t>(
+                1, static_cast<size_t>((static_cast<uint64_t>(src_frames) * dst_rate) / src_rate));
+            std::vector<float> resampled(dst_frames * 2);
+            const double step = static_cast<double>(src_rate) / static_cast<double>(dst_rate);
+            for (size_t i = 0; i < dst_frames; ++i) {
+                const double pos = i * step;
+                const size_t idx0 = std::min<size_t>(static_cast<size_t>(pos), src_frames - 1);
+                const size_t idx1 = std::min<size_t>(idx0 + 1, src_frames - 1);
+                const float frac = static_cast<float>(pos - static_cast<double>(idx0));
+                resampled[i * 2 + 0] = stereo[idx0 * 2 + 0] + (stereo[idx1 * 2 + 0] - stereo[idx0 * 2 + 0]) * frac;
+                resampled[i * 2 + 1] = stereo[idx0 * 2 + 1] + (stereo[idx1 * 2 + 1] - stereo[idx0 * 2 + 1]) * frac;
+            }
+            v->bridge->submit_pcm_float(resampled.data(), resampled.size());
+        } else {
+            v->bridge->submit_pcm_float(stereo.data(), stereo.size());
+        }
     }
     return 0; // S_OK
 }
@@ -358,6 +407,23 @@ inline int32_t xa2_commit(void*, uint32_t) { return 0; }
 inline void xa2_perf(void*, void*) {}
 inline void xa2_debug(void*, const void*, void*) {}
 
+inline int32_t xa27_get_device_count(void*, uint32_t* out_count) {
+    if (!out_count) return static_cast<int32_t>(0x80070057u);
+    *out_count = 1;
+    return 0;
+}
+inline int32_t xa27_get_device_details(void*, uint32_t index, void* out_details) {
+    if (index != 0 || !out_details) return static_cast<int32_t>(0x88960001u);
+    std::memset(out_details, 0, 1068);
+    return 0;
+}
+inline int32_t xa27_initialize(void*, uint32_t, uint32_t) { return 0; }
+inline int32_t xa27_create_mastering_voice(
+    void* self, void** pp_voice, uint32_t ch, uint32_t rate,
+    uint32_t flags, uint32_t, const void* fx_chain) {
+    return xa2_create_mastering_voice(self, pp_voice, ch, rate, flags, nullptr, fx_chain, 0);
+}
+
 inline const IXAudio2Vtbl kXAudio2Vtbl = {
     xa2_query_interface, xa2_add_ref, xa2_release,
     xa2_reg_cb, xa2_unreg_cb,
@@ -365,15 +431,32 @@ inline const IXAudio2Vtbl kXAudio2Vtbl = {
     xa2_start_engine, xa2_stop_engine, xa2_commit, xa2_perf, xa2_debug
 };
 
+inline const IXAudio2_7Vtbl kXAudio2_7Vtbl = {
+    xa2_query_interface, xa2_add_ref, xa2_release,
+    xa27_get_device_count, xa27_get_device_details, xa27_initialize,
+    xa2_reg_cb, xa2_unreg_cb,
+    xa2_create_source_voice, xa2_create_submix_voice, xa27_create_mastering_voice,
+    xa2_start_engine, xa2_stop_engine, xa2_commit, xa2_perf, xa2_debug
+};
+
 } // namespace detail
 
-inline int32_t create_xaudio2_com(void** out_xa2, AAudioXAudioBridge* bridge = &AAudioXAudioBridge::global()) {
+inline int32_t create_xaudio2_com(void** out_xa2,
+                                  bool legacy_2_7 = false,
+                                  AAudioXAudioBridge* bridge = &AAudioXAudioBridge::global()) {
     if (!out_xa2 || !bridge) return static_cast<int32_t>(0x80070057u); // E_INVALIDARG
     if (!bridge->start(48000, 2)) return static_cast<int32_t>(0x80004005u); // E_FAIL
-    auto* obj = new IXAudio2Com();
-    obj->lpVtbl = &detail::kXAudio2Vtbl;
-    obj->bridge = bridge;
-    *out_xa2 = obj;
+    if (legacy_2_7) {
+        auto* obj = new IXAudio2_7Com();
+        obj->lpVtbl = &detail::kXAudio2_7Vtbl;
+        obj->bridge = bridge;
+        *out_xa2 = obj;
+    } else {
+        auto* obj = new IXAudio2Com();
+        obj->lpVtbl = &detail::kXAudio2Vtbl;
+        obj->bridge = bridge;
+        *out_xa2 = obj;
+    }
     return 0; // S_OK
 }
 

@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <cstring>
+#include <thread>
 
 #if defined(__linux__) || defined(__ANDROID__)
 #include <sys/mman.h>
@@ -307,12 +308,104 @@ void thunk_WakeByAddressAll(x64emu_t* emu) {
     }
 }
 
-// --- Audio (XAudio2 -> Android AAudio low-latency bridge) ---
+// --- Audio (XAudio2.7 & XAudio2.9 COM -> Android AAudio low-latency bridge) ---
 
-void thunk_XAudio2Create(x64emu_t* emu) {
+void thunk_XAudio2Create_27(x64emu_t* emu) {
     auto** out_xa2 = reinterpret_cast<void**>(reg_rcx(emu));
-    const int32_t hr = mobiro::audio::create_xaudio2_com(out_xa2);
+    const int32_t hr = mobiro::audio::create_xaudio2_com(out_xa2, /*legacy_2_7=*/true);
     reg_rax(emu) = static_cast<uint64_t>(static_cast<uint32_t>(hr));
+}
+
+void thunk_XAudio2Create_29(x64emu_t* emu) {
+    auto** out_xa2 = reinterpret_cast<void**>(reg_rcx(emu));
+    const int32_t hr = mobiro::audio::create_xaudio2_com(out_xa2, /*legacy_2_7=*/false);
+    reg_rax(emu) = static_cast<uint64_t>(static_cast<uint32_t>(hr));
+}
+
+// --- Critical Sections, Time, Sleep & MSVC CRT Startup ---
+
+void thunk_InitializeCriticalSection(x64emu_t* emu) {
+    if (auto* b = Box64Bridge::instance()) b->crit_sections().initialize(static_cast<uintptr_t>(reg_rcx(emu)));
+    reg_rax(emu) = 1ULL; // Also serves InitializeCriticalSectionAndSpinCount / Ex (returns BOOL TRUE)
+}
+void thunk_EnterCriticalSection(x64emu_t* emu) {
+    if (auto* b = Box64Bridge::instance()) b->crit_sections().enter(static_cast<uintptr_t>(reg_rcx(emu)));
+}
+void thunk_TryEnterCriticalSection(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    reg_rax(emu) = (b && b->crit_sections().try_enter(static_cast<uintptr_t>(reg_rcx(emu)))) ? 1ULL : 0ULL;
+}
+void thunk_LeaveCriticalSection(x64emu_t* emu) {
+    if (auto* b = Box64Bridge::instance()) b->crit_sections().leave(static_cast<uintptr_t>(reg_rcx(emu)));
+}
+void thunk_DeleteCriticalSection(x64emu_t* emu) {
+    if (auto* b = Box64Bridge::instance()) b->crit_sections().destroy(static_cast<uintptr_t>(reg_rcx(emu)));
+}
+
+void thunk_GetSystemTimeAsFileTime(x64emu_t* emu) {
+    auto* out = reinterpret_cast<uint64_t*>(reg_rcx(emu));
+    if (!out) return;
+    constexpr uint64_t kEpochDiff100ns = 116444736000000000ULL; // 1601-01-01 -> 1970-01-01
+    const auto now = std::chrono::system_clock::now().time_since_epoch();
+    const uint64_t ticks = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(now).count() / 100);
+    *out = ticks + kEpochDiff100ns;
+}
+
+void thunk_GetTickCount64(x64emu_t* emu) {
+    const auto now = std::chrono::steady_clock::now().time_since_epoch();
+    reg_rax(emu) = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(now).count());
+}
+
+void thunk_Sleep(x64emu_t* emu) {
+    const uint32_t ms = static_cast<uint32_t>(reg_rcx(emu));
+    if (ms == 0) std::this_thread::yield();
+    else std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+}
+
+void thunk_SwitchToThread(x64emu_t* emu) {
+    std::this_thread::yield();
+    reg_rax(emu) = 1ULL;
+}
+
+void thunk_GetCommandLineW(x64emu_t* emu) {
+    static const uint16_t kCmdW[] = {'"','S','e','k','i','r','o','.','e','x','e','"', 0};
+    reg_rax(emu) = reinterpret_cast<uintptr_t>(kCmdW);
+}
+
+void thunk_GetCommandLineA(x64emu_t* emu) {
+    static const char kCmdA[] = "\"Sekiro.exe\"";
+    reg_rax(emu) = reinterpret_cast<uintptr_t>(kCmdA);
+}
+
+void thunk_GetStartupInfoW(x64emu_t* emu) {
+    auto* out = reinterpret_cast<uint8_t*>(reg_rcx(emu));
+    if (!out) return;
+    std::memset(out, 0, 104); // sizeof(STARTUPINFOW) on Win64
+    const uint32_t cb = 104;
+    std::memcpy(out, &cb, sizeof(cb));
+}
+
+void thunk_IsProcessorFeaturePresent(x64emu_t* emu) {
+    const uint32_t feat = static_cast<uint32_t>(reg_rcx(emu));
+    // Advertise standard x86_64 baseline features translated by Box64 Dynarec
+    switch (feat) {
+        case 6:  // PF_XMMI_INSTRUCTIONS_AVAILABLE (SSE)
+        case 8:  // PF_RDTSC_INSTRUCTION_AVAILABLE
+        case 10: // PF_XMMI64_INSTRUCTIONS_AVAILABLE (SSE2)
+        case 13: // PF_SSE3_INSTRUCTIONS_AVAILABLE
+        case 14: // PF_COMPARE_EXCHANGE128
+        case 23: // PF_FASTFAIL_AVAILABLE
+        case 36: // PF_SSSE3_INSTRUCTIONS_AVAILABLE
+        case 37: // PF_SSE4_1_INSTRUCTIONS_AVAILABLE
+        case 38: // PF_SSE4_2_INSTRUCTIONS_AVAILABLE
+            reg_rax(emu) = 1ULL;
+            return;
+        default:
+            reg_rax(emu) = 0ULL;
+            return;
+    }
 }
 
 // --- Error state, SystemInfo & SEH Unwind ---
@@ -524,6 +617,7 @@ void Box64Bridge::shutdown() {
     threads_.join_all();
     files_.close_all();
     srw_locks_.clear();
+    crit_sections_.clear();
     events_.clear();
     heap_.reset();
     if (stub_pool_) {
@@ -612,9 +706,26 @@ void Box64Bridge::register_default_win32_thunks() {
     register_thunk("kernelbase.dll", "WakeByAddressSingle", &thunk_WakeByAddressSingle);
     register_thunk("kernelbase.dll", "WakeByAddressAll", &thunk_WakeByAddressAll);
 
+    // Critical Sections, Timing & MSVC CRT Startup
+    register_thunk("kernel32.dll", "InitializeCriticalSection", &thunk_InitializeCriticalSection);
+    register_thunk("kernel32.dll", "InitializeCriticalSectionAndSpinCount", &thunk_InitializeCriticalSection);
+    register_thunk("kernel32.dll", "InitializeCriticalSectionEx", &thunk_InitializeCriticalSection);
+    register_thunk("kernel32.dll", "EnterCriticalSection", &thunk_EnterCriticalSection);
+    register_thunk("kernel32.dll", "TryEnterCriticalSection", &thunk_TryEnterCriticalSection);
+    register_thunk("kernel32.dll", "LeaveCriticalSection", &thunk_LeaveCriticalSection);
+    register_thunk("kernel32.dll", "DeleteCriticalSection", &thunk_DeleteCriticalSection);
+    register_thunk("kernel32.dll", "GetSystemTimeAsFileTime", &thunk_GetSystemTimeAsFileTime);
+    register_thunk("kernel32.dll", "GetTickCount64", &thunk_GetTickCount64);
+    register_thunk("kernel32.dll", "Sleep", &thunk_Sleep);
+    register_thunk("kernel32.dll", "SwitchToThread", &thunk_SwitchToThread);
+    register_thunk("kernel32.dll", "GetCommandLineW", &thunk_GetCommandLineW);
+    register_thunk("kernel32.dll", "GetCommandLineA", &thunk_GetCommandLineA);
+    register_thunk("kernel32.dll", "GetStartupInfoW", &thunk_GetStartupInfoW);
+    register_thunk("kernel32.dll", "IsProcessorFeaturePresent", &thunk_IsProcessorFeaturePresent);
+
     // Audio
-    register_thunk("xaudio2_7.dll", "XAudio2Create", &thunk_XAudio2Create);
-    register_thunk("xaudio2_9.dll", "XAudio2Create", &thunk_XAudio2Create);
+    register_thunk("xaudio2_7.dll", "XAudio2Create", &thunk_XAudio2Create_27);
+    register_thunk("xaudio2_9.dll", "XAudio2Create", &thunk_XAudio2Create_29);
 
     // SEH Unwind (ntdll + kernel32 forwarder)
     register_thunk("kernel32.dll", "RtlLookupFunctionEntry", &thunk_RtlLookupFunctionEntry);

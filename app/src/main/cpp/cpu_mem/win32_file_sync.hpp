@@ -220,4 +220,41 @@ private:
     std::unordered_map<uintptr_t, std::shared_mutex*> locks_;
 };
 
+// Maps guest CRITICAL_SECTION* addresses to native recursive mutexes (MSVC CRT / FromSoft engine locks)
+class CriticalSectionTable {
+public:
+    ~CriticalSectionTable() { clear(); }
+
+    void initialize(uintptr_t cs) { if (cs) (void)get_or_create(cs); }
+    void enter(uintptr_t cs)      { if (cs) get_or_create(cs)->lock(); }
+    bool try_enter(uintptr_t cs)  { return cs && get_or_create(cs)->try_lock(); }
+    void leave(uintptr_t cs)      { if (cs) get_or_create(cs)->unlock(); }
+
+    void destroy(uintptr_t cs) {
+        std::lock_guard<std::mutex> lock(mu_);
+        auto it = locks_.find(cs);
+        if (it != locks_.end()) {
+            delete it->second;
+            locks_.erase(it);
+        }
+    }
+
+    void clear() {
+        std::lock_guard<std::mutex> lock(mu_);
+        for (auto& [_, m] : locks_) delete m;
+        locks_.clear();
+    }
+
+private:
+    std::recursive_mutex* get_or_create(uintptr_t key) {
+        std::lock_guard<std::mutex> lock(mu_);
+        auto& ptr = locks_[key];
+        if (!ptr) ptr = new std::recursive_mutex();
+        return ptr;
+    }
+
+    std::mutex mu_;
+    std::unordered_map<uintptr_t, std::recursive_mutex*> locks_;
+};
+
 } // namespace mobiro::win32

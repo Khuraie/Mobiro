@@ -61,6 +61,7 @@ public:
     validator::VfsMapper* vfs() const { return vfs_; }
     win32::FileHandleTable& files() { return files_; }
     win32::SrwLockTable& srw_locks() { return srw_locks_; }
+    win32::CriticalSectionTable& crit_sections() { return crit_sections_; }
     win32::GuestHeap& heap() { return heap_; }
     win32::EventTable& events() { return events_; }
     win32::SehUnwindRegistry& seh() { return seh_; }
@@ -82,6 +83,7 @@ private:
     validator::VfsMapper* vfs_ = nullptr;
     win32::FileHandleTable files_;
     win32::SrwLockTable srw_locks_;
+    win32::CriticalSectionTable crit_sections_;
     win32::GuestHeap heap_;
     win32::EventTable events_;
     win32::SehUnwindRegistry seh_;

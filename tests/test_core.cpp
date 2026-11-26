@@ -689,7 +689,9 @@ void test_vfs_write_overlay_threads_wait_and_audio() {
     emu.rcx = reinterpret_cast<uint64_t>(&xa2_ptr);
     assert(bridge.invoke_thunk("xaudio2_7.dll", "XAudio2Create", &emu));
     assert(emu.rax == 0 && xa2_ptr != nullptr);
-    auto* xa2_com = static_cast<mobiro::audio::IXAudio2Com*>(xa2_ptr);
+    auto* xa2_com = static_cast<mobiro::audio::IXAudio2_7Com*>(xa2_ptr);
+    uint32_t dev_count = 0;
+    assert(xa2_com->lpVtbl->GetDeviceCount(xa2_com, &dev_count) == 0 && dev_count == 1);
     assert(xa2_com->lpVtbl->Release(xa2_com) == 0);
 
     auto& audio = mobiro::audio::AAudioXAudioBridge::global();
@@ -864,6 +866,77 @@ void test_xaudio2_com_and_touch_overlay_vk() {
 
     overlay.set_enabled(false);
     assert(overlay.pack_quads(quads) == 0);
+
+    // 3. Validate embedded Vulkan 1.0 SPIR-V vertex & fragment HUD shaders
+    assert(mobiro::gfx::spirv::validate_module(
+        mobiro::gfx::spirv::kHudVertSpv, std::size(mobiro::gfx::spirv::kHudVertSpv)));
+    assert(mobiro::gfx::spirv::validate_module(
+        mobiro::gfx::spirv::kHudFragSpv, std::size(mobiro::gfx::spirv::kHudFragSpv)));
+
+    // 4. XAudio2.7 COM vtable + 24 kHz -> 48 kHz linear resampler + MSVC CRT Win32 shims
+    mobiro::mem::GuestArena arena2;
+    assert(arena2.reserve(0x0000000100000000ULL, 64ULL * 1024 * 1024));
+    mobiro::validator::VfsMapper vfs2;
+    mobiro::cpu::Box64Bridge b2;
+    assert(b2.initialize(&arena2, &vfs2));
+
+    void* xa27_raw = nullptr;
+    x64emu_t e2{};
+    e2.rcx = reinterpret_cast<uint64_t>(&xa27_raw);
+    assert(b2.invoke_thunk("xaudio2_7.dll", "XAudio2Create", &e2));
+    assert(e2.rax == 0 && xa27_raw != nullptr);
+    auto* xa27 = static_cast<mobiro::audio::IXAudio2_7Com*>(xa27_raw);
+    assert(xa27->lpVtbl->Initialize(xa27, 0, 0) == 0);
+
+    mobiro::audio::WaveFormatEx fmt24{};
+    fmt24.format_tag = 3; // IEEE_FLOAT
+    fmt24.channels = 2;
+    fmt24.samples_per_sec = 24000; // Half of 48 kHz -> resampler doubles frames
+    fmt24.bits_per_sample = 32;
+    void* v24_raw = nullptr;
+    assert(xa27->lpVtbl->CreateSourceVoice(xa27, &v24_raw, &fmt24, 0, 2.0f, nullptr, nullptr, nullptr) == 0);
+    auto* v24 = static_cast<mobiro::audio::IXAudio2SourceVoiceCom*>(v24_raw);
+    const float src24[4] = {0.0f, 0.0f, 1.0f, 1.0f}; // 2 frames @ 24kHz -> 4 frames (8 floats) @ 48kHz
+    mobiro::audio::XAudio2Buffer b24{};
+    b24.audio_bytes = sizeof(src24);
+    b24.audio_data = reinterpret_cast<const uint8_t*>(src24);
+    assert(v24->lpVtbl->SubmitSourceBuffer(v24, &b24, nullptr) == 0);
+    float resamp[8]{};
+    assert(aaudio.drain_pcm_float(resamp, 8) == 8);
+    assert(std::abs(resamp[0] - 0.0f) < 1e-4f && std::abs(resamp[2] - 0.5f) < 1e-4f && std::abs(resamp[4] - 1.0f) < 1e-4f);
+    v24->lpVtbl->base.DestroyVoice(v24);
+    assert(xa27->lpVtbl->Release(xa27) == 0);
+    aaudio.stop();
+
+    // CriticalSection (recursive), FileTime, TickCount64, StartupInfoW, CommandLine, CPU features
+    uint8_t fake_cs[40]{};
+    e2 = {}; e2.rcx = reinterpret_cast<uint64_t>(fake_cs);
+    assert(b2.invoke_thunk("kernel32.dll", "InitializeCriticalSectionAndSpinCount", &e2) && e2.rax == 1);
+    assert(b2.invoke_thunk("kernel32.dll", "EnterCriticalSection", &e2));
+    assert(b2.invoke_thunk("kernel32.dll", "TryEnterCriticalSection", &e2) && e2.rax == 1);
+    assert(b2.invoke_thunk("kernel32.dll", "LeaveCriticalSection", &e2));
+    assert(b2.invoke_thunk("kernel32.dll", "LeaveCriticalSection", &e2));
+    assert(b2.invoke_thunk("kernel32.dll", "DeleteCriticalSection", &e2));
+
+    uint64_t ft = 0;
+    e2 = {}; e2.rcx = reinterpret_cast<uint64_t>(&ft);
+    assert(b2.invoke_thunk("kernel32.dll", "GetSystemTimeAsFileTime", &e2));
+    assert(ft > 130000000000000000ULL);
+    assert(b2.invoke_thunk("kernel32.dll", "GetTickCount64", &e2) && e2.rax > 0);
+
+    uint8_t si_buf[104]{};
+    e2 = {}; e2.rcx = reinterpret_cast<uint64_t>(si_buf);
+    assert(b2.invoke_thunk("kernel32.dll", "GetStartupInfoW", &e2));
+    uint32_t si_cb = 0;
+    std::memcpy(&si_cb, si_buf, 4);
+    assert(si_cb == 104);
+
+    assert(b2.invoke_thunk("kernel32.dll", "GetCommandLineA", &e2) && e2.rax != 0);
+    assert(std::strcmp(reinterpret_cast<const char*>(e2.rax), "\"Sekiro.exe\"") == 0);
+
+    e2.rcx = 10; // PF_XMMI64_INSTRUCTIONS_AVAILABLE (SSE2)
+    assert(b2.invoke_thunk("kernel32.dll", "IsProcessorFeaturePresent", &e2) && e2.rax == 1);
+    b2.shutdown();
 }
 
 } // namespace

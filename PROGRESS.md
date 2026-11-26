@@ -6,7 +6,19 @@
 
 ## Log Entries
 
+### Increment 8 — M6: XAudio2.7 COM Vtable + Linear Resampler, MSVC CRT Startup Shims, Embedded SPIR-V HUD Shaders & Upstream Cross-Build Fix (2026-11-27)
+- **Status:** Implemented & verified (local MSVC 2022 + GitHub Actions Linux GCC & Android ARM64 NDK)
+- **Changes:**
+  - Added legacy `IXAudio2_7Vtbl` (`GetDeviceCount`, `GetDeviceDetails`, `Initialize`, `CreateMasteringVoice` 7-arg signature) alongside `IXAudio2Vtbl` (XAudio2.9) and a stereo linear sample-rate resampler (`src_rate -> 48 kHz`) in `app/src/main/cpp/audio/xaudio2_com.hpp`, wiring `xaudio2_7.dll` and `xaudio2_9.dll` to their exact COM ABIs in `win32_shim.cpp`.
+  - Implemented recursive `CriticalSectionTable` (`InitializeCriticalSection*`, `EnterCriticalSection`, `TryEnterCriticalSection`, `LeaveCriticalSection`, `DeleteCriticalSection`) and core MSVC CRT startup Win32 thunks (`GetSystemTimeAsFileTime`, `GetTickCount64`, `Sleep`, `SwitchToThread`, `GetCommandLineW`/`A`, `GetStartupInfoW`, `IsProcessorFeaturePresent`) across `win32_file_sync.hpp`, `box64_bridge.hpp`, and `win32_shim.cpp`.
+  - Embedded pre-assembled Vulkan 1.0 SPIR-V vertex & fragment shader modules (`kHudVertSpv`, `kHudFragSpv`) + `spirv::validate_module` structural verifier in `app/src/main/cpp/gfx/touch_overlay_vk.hpp`.
+  - Fixed `ANDROID_NDK_HOME` propagation (`$GITHUB_ENV`) in `.github/workflows/build-third-party.yml` discovered during live upstream Box64/Turnip cross-build testing (Run `45861214515`).
+  - Expanded `tests/test_core.cpp` to verify XAudio2.7 COM dispatch, 24 kHz → 48 kHz linear resampling, recursive critical sections, CRT startup shims, and SPIR-V shader validation.
+
+---
+
 ### Increment 7 — M5: `IXAudio2` COM Voice Vtables, Vulkan Touch HUD Vertex Packer & CI Artifact / Upstream Build Workflows (2026-11-27)
+- **Commit:** `e9cd99b` (CI Run `45860781333` — Linux GCC tests 28s, Android ARM64 APK + artifact upload 1m12s)
 - **Status:** Implemented & verified (local MSVC 2022 + GitHub Actions Linux GCC & Android ARM64 NDK)
 - **Changes:**
   - Implemented Win64 binary-compatible `IXAudio2` / `IXAudio2Voice` / `IXAudio2SourceVoice` COM vtables (`app/src/main/cpp/audio/xaudio2_com.hpp`) supporting `CreateMasteringVoice`, `CreateSourceVoice` (PCM16 and IEEE float32, mono upmix & stereo, per-voice volume gain), `SubmitSourceBuffer` feeding `AAudioXAudioBridge`, `Start`/`Stop`, `GetState`, and `IUnknown` refcounting; wired `thunk_XAudio2Create` in `win32_shim.cpp` to return real COM objects.

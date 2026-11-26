@@ -30,26 +30,21 @@ jobs:
           SDKMGR="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           yes | "$SDKMGR" --licenses > /dev/null 2>&1 || true
           "$SDKMGR" "ndk;27.2.12479018" "cmake;3.22.1"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
 
       - name: Fetch Open-Source Upstream Repos
         run: bash scripts/fetch_third_party.sh
 
       - name: Build Box64 (arm64-v8a)
         if: ${{ inputs.build_box64 }}
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
         run: bash scripts/build_box64_android.sh
 
       - name: Build Mesa Turnip ICD (arm64-v8a)
         if: ${{ inputs.build_turnip }}
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
         run: bash scripts/build_turnip_android.sh
 
       - name: Build Native DXVK (arm64-v8a)
         if: ${{ inputs.build_dxvk }}
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
         run: bash scripts/build_dxvk_android.sh
 
       - name: Upload Built ARM64 Native Artifacts
