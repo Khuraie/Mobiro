@@ -247,6 +247,7 @@ private:
     mutable std::mutex unresolved_mu_;
     std::deque<std::string> interned_unresolved_;
     std::unordered_map<std::string, uintptr_t> unresolved_stub_cache_;
+    std::unordered_map<std::string, uintptr_t> resolved_stub_cache_;
     std::vector<std::string> called_unresolved_;
     struct TracedImport {
         NativeThunkFn fn = nullptr;
