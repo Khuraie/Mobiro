@@ -19,11 +19,18 @@ on:
         description: "Assemble sideloadable arm64-v8a Debug APK bundling built .so/.a components"
         type: boolean
         default: true
+      prebuilt_run_id:
+        description: "Optional prior workflow run ID to reuse mobiro-upstream-arm64-libs for fast ~50s APK rebuilds"
+        type: string
+        default: ""
 
 jobs:
   build-upstream-arm64:
     name: Cross-Compile Upstream Open-Source Binaries (arm64-v8a)
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
     steps:
       - uses: actions/checkout@v5
 
@@ -33,16 +40,28 @@ jobs:
           distribution: temurin
           java-version: 17
 
+      - name: Reuse Cached Upstream ARM64 Native Artifacts
+        if: ${{ inputs.prebuilt_run_id != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: mobiro-upstream-arm64-libs
+          run-id: ${{ inputs.prebuilt_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: .
+
       - name: Install NDK & Cross-Build Tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build meson pkg-config bison flex python3-mako python3-yaml glslang-tools
+          if [ "${{ inputs.build_box64 }}" = "true" ] || [ "${{ inputs.build_turnip }}" = "true" ] || [ "${{ inputs.build_dxvk }}" = "true" ]; then
+            sudo apt-get update
+            sudo apt-get install -y ninja-build meson pkg-config bison flex python3-mako python3-yaml glslang-tools
+          fi
           SDKMGR="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           yes | "$SDKMGR" --licenses > /dev/null 2>&1 || true
           "$SDKMGR" "ndk;27.2.12479018" "cmake;3.22.1" "platforms;android-35" "build-tools;35.0.0"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
 
       - name: Fetch Open-Source Upstream Repos
+        if: ${{ inputs.build_box64 || inputs.build_turnip || inputs.build_dxvk }}
         run: bash scripts/fetch_third_party.sh
 
       - name: Build Box64 (arm64-v8a)

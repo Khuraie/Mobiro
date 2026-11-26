@@ -36,6 +36,10 @@ if(ANDROID)
     )
     set_target_properties(mobiro_runtime PROPERTIES OUTPUT_NAME "sekiro_runtime")
 
+    target_link_options(mobiro_runtime PRIVATE
+        "-Wl,-u,Java_com_google_androidgamesdk_GameActivity_initializeNativeCode"
+    )
+
     target_link_libraries(mobiro_runtime
         PRIVATE
             mobiro_core
