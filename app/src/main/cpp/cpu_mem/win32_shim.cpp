@@ -1625,6 +1625,15 @@ void thunk_crt_sprintf(x64emu_t* emu) {
     reg_rax(emu) = static_cast<uint64_t>(static_cast<int64_t>(format_win64_str(dst, 4096, fmt, args, 8)));
 }
 
+void thunk_crt_vsprintf(x64emu_t* emu) {
+    auto* dst = reinterpret_cast<char*>(reg_rcx(emu));
+    const auto* fmt = reinterpret_cast<const char*>(reg_rdx(emu));
+    const auto* va = reinterpret_cast<const uint64_t*>(reg_r8(emu));
+    uint64_t args[8]{};
+    if (va) std::memcpy(args, va, sizeof(args));
+    reg_rax(emu) = static_cast<uint64_t>(static_cast<int64_t>(format_win64_str(dst, 4096, fmt, args, 8)));
+}
+
 void thunk_crt_vsnprintf(x64emu_t* emu) {
     auto* dst = reinterpret_cast<char*>(reg_rcx(emu));
     const size_t max_len = static_cast<size_t>(reg_rdx(emu));
@@ -1633,6 +1642,228 @@ void thunk_crt_vsnprintf(x64emu_t* emu) {
     uint64_t args[8]{};
     if (va) std::memcpy(args, va, sizeof(args));
     reg_rax(emu) = static_cast<uint64_t>(static_cast<int64_t>(format_win64_str(dst, max_len, fmt, args, 8)));
+}
+
+void thunk_crt_swprintf(x64emu_t* emu) {
+    auto* dst = reinterpret_cast<uint16_t*>(reg_rcx(emu));
+    const size_t max_len = static_cast<size_t>(reg_rdx(emu));
+    const auto* fmt16 = reinterpret_cast<const uint16_t*>(reg_r8(emu));
+    const std::string fmt = win32::utf16le_to_utf8(fmt16);
+    const uint64_t args[8] = {
+        reg_r9(emu), stack_arg(emu, 0), stack_arg(emu, 1), stack_arg(emu, 2),
+        stack_arg(emu, 3), stack_arg(emu, 4), stack_arg(emu, 5), stack_arg(emu, 6)
+    };
+    char tmp[1024]{};
+    const int n = format_win64_str(tmp, sizeof(tmp), fmt.c_str(), args, 8);
+    if (dst && max_len > 0) {
+        const size_t cpy = std::min<size_t>(static_cast<size_t>(n > 0 ? n : 0), max_len - 1);
+        for (size_t i = 0; i < cpy; ++i) dst[i] = static_cast<uint8_t>(tmp[i]);
+        dst[cpy] = 0;
+    }
+    reg_rax(emu) = static_cast<uint64_t>(static_cast<int64_t>(n));
+}
+
+void thunk_crt_vswprintf(x64emu_t* emu) {
+    auto* dst = reinterpret_cast<uint16_t*>(reg_rcx(emu));
+    const size_t max_len = static_cast<size_t>(reg_rdx(emu));
+    const auto* fmt16 = reinterpret_cast<const uint16_t*>(reg_r8(emu));
+    const auto* va = reinterpret_cast<const uint64_t*>(reg_r9(emu));
+    const std::string fmt = win32::utf16le_to_utf8(fmt16);
+    uint64_t args[8]{};
+    if (va) std::memcpy(args, va, sizeof(args));
+    char tmp[1024]{};
+    const int n = format_win64_str(tmp, sizeof(tmp), fmt.c_str(), args, 8);
+    if (dst && max_len > 0) {
+        const size_t cpy = std::min<size_t>(static_cast<size_t>(n > 0 ? n : 0), max_len - 1);
+        for (size_t i = 0; i < cpy; ++i) dst[i] = static_cast<uint8_t>(tmp[i]);
+        dst[cpy] = 0;
+    }
+    reg_rax(emu) = static_cast<uint64_t>(static_cast<int64_t>(n));
+}
+
+void thunk_crt_strncat(x64emu_t* emu) {
+    auto* dst = reinterpret_cast<char*>(reg_rcx(emu));
+    const auto* src = reinterpret_cast<const char*>(reg_rdx(emu));
+    const size_t n = static_cast<size_t>(reg_r8(emu));
+    if (dst && src) std::strncat(dst, src, n);
+    reg_rax(emu) = reg_rcx(emu);
+}
+
+void thunk_crt_strcspn(x64emu_t* emu) {
+    const auto* a = reinterpret_cast<const char*>(reg_rcx(emu));
+    const auto* b = reinterpret_cast<const char*>(reg_rdx(emu));
+    reg_rax(emu) = (a && b) ? std::strcspn(a, b) : 0ULL;
+}
+
+void thunk_crt_strspn(x64emu_t* emu) {
+    const auto* a = reinterpret_cast<const char*>(reg_rcx(emu));
+    const auto* b = reinterpret_cast<const char*>(reg_rdx(emu));
+    reg_rax(emu) = (a && b) ? std::strspn(a, b) : 0ULL;
+}
+
+void thunk_crt_strpbrk(x64emu_t* emu) {
+    const auto* a = reinterpret_cast<const char*>(reg_rcx(emu));
+    const auto* b = reinterpret_cast<const char*>(reg_rdx(emu));
+    reg_rax(emu) = (a && b) ? reinterpret_cast<uintptr_t>(std::strpbrk(a, b)) : 0ULL;
+}
+
+void thunk_crt_wcscat(x64emu_t* emu) {
+    auto* dst = reinterpret_cast<uint16_t*>(reg_rcx(emu));
+    const auto* src = reinterpret_cast<const uint16_t*>(reg_rdx(emu));
+    if (dst && src) {
+        size_t i = 0;
+        while (dst[i]) ++i;
+        size_t j = 0;
+        do { dst[i + j] = src[j]; } while (src[j++] != 0);
+    }
+    reg_rax(emu) = reg_rcx(emu);
+}
+
+void thunk_crt_wcsncmp(x64emu_t* emu) {
+    const auto* a = reinterpret_cast<const uint16_t*>(reg_rcx(emu));
+    const auto* b = reinterpret_cast<const uint16_t*>(reg_rdx(emu));
+    size_t n = static_cast<size_t>(reg_r8(emu));
+    if (!a || !b || !n) { reg_rax(emu) = 0ULL; return; }
+    while (n-- && (*a || *b)) {
+        if (*a != *b) { reg_rax(emu) = static_cast<uint64_t>(static_cast<int64_t>(*a) - static_cast<int64_t>(*b)); return; }
+        if (!*a) break;
+        ++a; ++b;
+    }
+    reg_rax(emu) = 0ULL;
+}
+
+void thunk_crt_wcsicmp(x64emu_t* emu) {
+    const auto* a = reinterpret_cast<const uint16_t*>(reg_rcx(emu));
+    const auto* b = reinterpret_cast<const uint16_t*>(reg_rdx(emu));
+    if (!a || !b) { reg_rax(emu) = (a == b) ? 0ULL : (a ? 1ULL : ~0ULL); return; }
+    while (*a && *b) {
+        int ca = (*a < 128) ? std::tolower(static_cast<unsigned char>(*a)) : static_cast<int>(*a);
+        int cb = (*b < 128) ? std::tolower(static_cast<unsigned char>(*b)) : static_cast<int>(*b);
+        if (ca != cb) { reg_rax(emu) = static_cast<uint64_t>(static_cast<int64_t>(ca - cb)); return; }
+        ++a; ++b;
+    }
+    reg_rax(emu) = static_cast<uint64_t>(static_cast<int64_t>(*a) - static_cast<int64_t>(*b));
+}
+
+void thunk_crt_wcschr(x64emu_t* emu) {
+    const auto* s = reinterpret_cast<const uint16_t*>(reg_rcx(emu));
+    const uint16_t ch = static_cast<uint16_t>(reg_rdx(emu) & 0xFFFFu);
+    if (!s) { reg_rax(emu) = 0ULL; return; }
+    for (; ; ++s) {
+        if (*s == ch) { reg_rax(emu) = reinterpret_cast<uintptr_t>(s); return; }
+        if (!*s) break;
+    }
+    reg_rax(emu) = 0ULL;
+}
+
+void thunk_crt_wcsrchr(x64emu_t* emu) {
+    const auto* s = reinterpret_cast<const uint16_t*>(reg_rcx(emu));
+    const uint16_t ch = static_cast<uint16_t>(reg_rdx(emu) & 0xFFFFu);
+    const uint16_t* found = nullptr;
+    if (s) {
+        for (; ; ++s) {
+            if (*s == ch) found = s;
+            if (!*s) break;
+        }
+    }
+    reg_rax(emu) = reinterpret_cast<uintptr_t>(found);
+}
+
+void thunk_crt_tolower(x64emu_t* emu) { reg_rax(emu) = static_cast<uint64_t>(std::tolower(static_cast<unsigned char>(reg_rcx(emu)))); }
+void thunk_crt_toupper(x64emu_t* emu) { reg_rax(emu) = static_cast<uint64_t>(std::toupper(static_cast<unsigned char>(reg_rcx(emu)))); }
+void thunk_crt_isalpha(x64emu_t* emu) { reg_rax(emu) = std::isalpha(static_cast<unsigned char>(reg_rcx(emu))) ? 1ULL : 0ULL; }
+void thunk_crt_isdigit(x64emu_t* emu) { reg_rax(emu) = std::isdigit(static_cast<unsigned char>(reg_rcx(emu))) ? 1ULL : 0ULL; }
+void thunk_crt_isalnum(x64emu_t* emu) { reg_rax(emu) = std::isalnum(static_cast<unsigned char>(reg_rcx(emu))) ? 1ULL : 0ULL; }
+void thunk_crt_isspace(x64emu_t* emu) { reg_rax(emu) = std::isspace(static_cast<unsigned char>(reg_rcx(emu))) ? 1ULL : 0ULL; }
+void thunk_crt_isxdigit(x64emu_t* emu) { reg_rax(emu) = std::isxdigit(static_cast<unsigned char>(reg_rcx(emu))) ? 1ULL : 0ULL; }
+void thunk_crt_isprint(x64emu_t* emu) { reg_rax(emu) = std::isprint(static_cast<unsigned char>(reg_rcx(emu))) ? 1ULL : 0ULL; }
+void thunk_crt_clock(x64emu_t* emu) { reg_rax(emu) = static_cast<uint64_t>(std::clock()); }
+void thunk_crt_rand(x64emu_t* emu) { reg_rax(emu) = static_cast<uint64_t>(std::rand() & 0x7FFF); }
+void thunk_crt_srand(x64emu_t* emu) { std::srand(static_cast<unsigned int>(reg_rcx(emu))); reg_rax(emu) = 0ULL; }
+void thunk_crt_strtoll(x64emu_t* emu) {
+    const auto* s = reinterpret_cast<const char*>(reg_rcx(emu));
+    auto** endp = reinterpret_cast<char**>(reg_rdx(emu));
+    const int base = static_cast<int>(reg_r8(emu));
+    reg_rax(emu) = s ? static_cast<uint64_t>(std::strtoll(s, endp, base)) : 0ULL;
+}
+void thunk_crt_strerror(x64emu_t* emu) {
+    static const char kOk[] = "No error";
+    reg_rax(emu) = reinterpret_cast<uintptr_t>(kOk);
+}
+void thunk_crt_setlocale(x64emu_t* emu) {
+    static const char kC[] = "C";
+    reg_rax(emu) = reinterpret_cast<uintptr_t>(kC);
+}
+void thunk_crt_fopen(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    const auto* path = reinterpret_cast<const char*>(reg_rcx(emu));
+    const auto* mode = reinterpret_cast<const char*>(reg_rdx(emu));
+    if (!path || !mode) { reg_rax(emu) = 0ULL; return; }
+    std::string host;
+    const bool write = (std::strchr(mode, 'w') || std::strchr(mode, 'a') || std::strchr(mode, '+'));
+    if (b && b->vfs()) {
+        const bool ok = write ? b->vfs()->resolve_for_write(path, host) : b->vfs()->resolve(path, host);
+        if (!ok) { reg_rax(emu) = 0ULL; return; }
+    } else {
+        host = path;
+    }
+    reg_rax(emu) = reinterpret_cast<uintptr_t>(std::fopen(host.c_str(), mode));
+}
+void thunk_crt_fclose(x64emu_t* emu) {
+    auto* fp = reinterpret_cast<FILE*>(reg_rcx(emu));
+    reg_rax(emu) = fp ? static_cast<uint64_t>(static_cast<int64_t>(std::fclose(fp))) : 0ULL;
+}
+void thunk_crt_fread(x64emu_t* emu) {
+    auto* ptr = reinterpret_cast<void*>(reg_rcx(emu));
+    const size_t sz = static_cast<size_t>(reg_rdx(emu));
+    const size_t nm = static_cast<size_t>(reg_r8(emu));
+    auto* fp = reinterpret_cast<FILE*>(reg_r9(emu));
+    reg_rax(emu) = (ptr && fp) ? std::fread(ptr, sz, nm, fp) : 0ULL;
+}
+void thunk_crt_fwrite(x64emu_t* emu) {
+    const auto* ptr = reinterpret_cast<const void*>(reg_rcx(emu));
+    const size_t sz = static_cast<size_t>(reg_rdx(emu));
+    const size_t nm = static_cast<size_t>(reg_r8(emu));
+    auto* fp = reinterpret_cast<FILE*>(reg_r9(emu));
+    reg_rax(emu) = (ptr && fp) ? std::fwrite(ptr, sz, nm, fp) : 0ULL;
+}
+void thunk_crt_fseek(x64emu_t* emu) {
+    auto* fp = reinterpret_cast<FILE*>(reg_rcx(emu));
+    const long off = static_cast<long>(static_cast<int64_t>(reg_rdx(emu)));
+    const int whence = static_cast<int>(reg_r8(emu));
+    reg_rax(emu) = fp ? static_cast<uint64_t>(static_cast<int64_t>(std::fseek(fp, off, whence))) : ~0ULL;
+}
+void thunk_crt_ftell(x64emu_t* emu) {
+    auto* fp = reinterpret_cast<FILE*>(reg_rcx(emu));
+    reg_rax(emu) = fp ? static_cast<uint64_t>(static_cast<int64_t>(std::ftell(fp))) : ~0ULL;
+}
+void thunk_crt_fflush(x64emu_t* emu) {
+    auto* fp = reinterpret_cast<FILE*>(reg_rcx(emu));
+    reg_rax(emu) = fp ? static_cast<uint64_t>(static_cast<int64_t>(std::fflush(fp))) : 0ULL;
+}
+void thunk_CheckRemoteDebuggerPresent(x64emu_t* emu) {
+    if (auto* out = reinterpret_cast<uint32_t*>(reg_rdx(emu))) *out = 0u;
+    reg_rax(emu) = 1ULL;
+}
+void thunk_GetEnvironmentVariableA(x64emu_t* emu) {
+    const auto* name = reinterpret_cast<const char*>(reg_rcx(emu));
+    auto* dst = reinterpret_cast<char*>(reg_rdx(emu));
+    const uint32_t cap = static_cast<uint32_t>(reg_r8(emu));
+    const char* val = name ? std::getenv(name) : nullptr;
+    if (!val) { reg_rax(emu) = 0ULL; return; }
+    const size_t len = std::strlen(val);
+    if (!dst || cap == 0 || len + 1 > cap) { reg_rax(emu) = len + 1; return; }
+    std::memcpy(dst, val, len + 1);
+    reg_rax(emu) = len;
+}
+void thunk_RtlGetVersion(x64emu_t* emu) {
+    auto* info = reinterpret_cast<uint32_t*>(reg_rcx(emu));
+    if (!info) { reg_rax(emu) = 0xC000000DULL; return; }
+    info[1] = 10u;    // dwMajorVersion = 10
+    info[2] = 0u;     // dwMinorVersion = 0
+    info[3] = 19045u; // dwBuildNumber = 19045
+    info[4] = 2u;     // VER_PLATFORM_WIN32_NT
+    reg_rax(emu) = 0ULL; // STATUS_SUCCESS
 }
 
 void thunk_XInputGetCapabilities(x64emu_t* emu) {
@@ -2229,15 +2460,24 @@ void Box64Bridge::register_default_win32_thunks() {
         register_thunk(dll, "strcpy", &thunk_crt_strcpy);
         register_thunk(dll, "strncpy", &thunk_crt_strncpy);
         register_thunk(dll, "strcat", &thunk_crt_strcat);
+        register_thunk(dll, "strncat", &thunk_crt_strncat);
         register_thunk(dll, "strchr", &thunk_crt_strchr);
         register_thunk(dll, "strrchr", &thunk_crt_strrchr);
         register_thunk(dll, "strstr", &thunk_crt_strstr);
+        register_thunk(dll, "strcspn", &thunk_crt_strcspn);
+        register_thunk(dll, "strspn", &thunk_crt_strspn);
+        register_thunk(dll, "strpbrk", &thunk_crt_strpbrk);
         register_thunk(dll, "_stricmp", &thunk_crt_stricmp);
         register_thunk(dll, "_strnicmp", &thunk_crt_strnicmp);
         register_thunk(dll, "_strdup", &thunk_crt_strdup);
         register_thunk(dll, "wcscpy", &thunk_crt_wcscpy);
         register_thunk(dll, "wcsncpy", &thunk_crt_wcsncpy);
+        register_thunk(dll, "wcscat", &thunk_crt_wcscat);
         register_thunk(dll, "wcscmp", &thunk_crt_wcscmp);
+        register_thunk(dll, "wcsncmp", &thunk_crt_wcsncmp);
+        register_thunk(dll, "_wcsicmp", &thunk_crt_wcsicmp);
+        register_thunk(dll, "wcschr", &thunk_crt_wcschr);
+        register_thunk(dll, "wcsrchr", &thunk_crt_wcsrchr);
         register_thunk(dll, "malloc", &thunk_crt_malloc);
         register_thunk(dll, "calloc", &thunk_crt_calloc);
         register_thunk(dll, "realloc", &thunk_crt_realloc);
@@ -2249,21 +2489,61 @@ void Box64Bridge::register_default_win32_thunks() {
         register_thunk(dll, "atoi", &thunk_crt_atoi);
         register_thunk(dll, "atol", &thunk_crt_atoi);
         register_thunk(dll, "strtol", &thunk_crt_strtol);
+        register_thunk(dll, "strtoll", &thunk_crt_strtoll);
         register_thunk(dll, "strtoul", &thunk_crt_strtoul);
         register_thunk(dll, "strtoull", &thunk_crt_strtoull);
+        register_thunk(dll, "tolower", &thunk_crt_tolower);
+        register_thunk(dll, "toupper", &thunk_crt_toupper);
+        register_thunk(dll, "isalpha", &thunk_crt_isalpha);
+        register_thunk(dll, "isdigit", &thunk_crt_isdigit);
+        register_thunk(dll, "isalnum", &thunk_crt_isalnum);
+        register_thunk(dll, "isspace", &thunk_crt_isspace);
+        register_thunk(dll, "isxdigit", &thunk_crt_isxdigit);
+        register_thunk(dll, "isprint", &thunk_crt_isprint);
         register_thunk(dll, "time", &thunk_crt_time);
         register_thunk(dll, "_time64", &thunk_crt_time);
+        register_thunk(dll, "clock", &thunk_crt_clock);
+        register_thunk(dll, "rand", &thunk_crt_rand);
+        register_thunk(dll, "srand", &thunk_crt_srand);
         register_thunk(dll, "getenv", &thunk_crt_getenv);
         register_thunk(dll, "_errno", &thunk_crt_errno);
+        register_thunk(dll, "strerror", &thunk_crt_strerror);
+        register_thunk(dll, "setlocale", &thunk_crt_setlocale);
         register_thunk(dll, "sprintf", &thunk_crt_sprintf);
+        register_thunk(dll, "sprintf_s", &thunk_crt_snprintf);
         register_thunk(dll, "_snprintf", &thunk_crt_snprintf);
+        register_thunk(dll, "_snprintf_s", &thunk_crt_snprintf);
         register_thunk(dll, "snprintf", &thunk_crt_snprintf);
+        register_thunk(dll, "vsprintf", &thunk_crt_vsprintf);
         register_thunk(dll, "_vsnprintf", &thunk_crt_vsnprintf);
+        register_thunk(dll, "_vsnprintf_s", &thunk_crt_vsnprintf);
         register_thunk(dll, "vsnprintf", &thunk_crt_vsnprintf);
+        register_thunk(dll, "swprintf", &thunk_crt_swprintf);
+        register_thunk(dll, "_snwprintf", &thunk_crt_swprintf);
+        register_thunk(dll, "vswprintf", &thunk_crt_vswprintf);
+        register_thunk(dll, "_vsnwprintf", &thunk_crt_vswprintf);
+        register_thunk(dll, "printf", &thunk_ReturnZero);
+        register_thunk(dll, "fprintf", &thunk_ReturnZero);
+        register_thunk(dll, "vfprintf", &thunk_ReturnZero);
+        register_thunk(dll, "puts", &thunk_ReturnZero);
+        register_thunk(dll, "fopen", &thunk_crt_fopen);
+        register_thunk(dll, "fclose", &thunk_crt_fclose);
+        register_thunk(dll, "fread", &thunk_crt_fread);
+        register_thunk(dll, "fwrite", &thunk_crt_fwrite);
+        register_thunk(dll, "fseek", &thunk_crt_fseek);
+        register_thunk(dll, "ftell", &thunk_crt_ftell);
+        register_thunk(dll, "fflush", &thunk_crt_fflush);
         register_thunk(dll, "exit", &thunk_ReturnZero);
         register_thunk(dll, "_exit", &thunk_ReturnZero);
         register_thunk(dll, "abort", &thunk_ReturnZero);
     }
+    register_thunk("kernel32.dll", "FlushInstructionCache", &thunk_ReturnTrue);
+    register_thunk("kernel32.dll", "CheckRemoteDebuggerPresent", &thunk_CheckRemoteDebuggerPresent);
+    register_thunk("kernel32.dll", "GetEnvironmentVariableA", &thunk_GetEnvironmentVariableA);
+    register_thunk("ntdll.dll", "RtlGetVersion", &thunk_RtlGetVersion);
+    register_thunk("ntdll.dll", "NtClose", &thunk_CloseHandle);
+    register_thunk("ntdll.dll", "NtQueryInformationProcess", &thunk_ReturnZero);
+    register_thunk("ntdll.dll", "NtQuerySystemInformation", &thunk_ReturnZero);
     register_thunk("ntdll.dll", "RtlCopyMemory", &thunk_memcpy);
     register_thunk("ntdll.dll", "RtlMoveMemory", &thunk_memmove);
     register_thunk("ntdll.dll", "RtlZeroMemory", &thunk_RtlZeroMemory);
