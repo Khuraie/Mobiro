@@ -2055,6 +2055,73 @@ void thunk_MessageBoxLog(x64emu_t* emu) {
     reg_rax(emu) = 1ULL; // IDOK
 }
 
+void thunk_IsBadPtr(x64emu_t* emu) {
+    // Returns FALSE (0) if pointer is non-null (valid readable/writable/code ptr), TRUE (1) if null
+    reg_rax(emu) = (reg_rcx(emu) == 0ULL) ? 1ULL : 0ULL;
+}
+
+void thunk_IsWow64Process(x64emu_t* emu) {
+    if (auto* out = reinterpret_cast<uint32_t*>(reg_rdx(emu))) *out = 0u; // Native 64-bit
+    reg_rax(emu) = 1ULL;
+}
+
+void thunk_GetComputerNameA(x64emu_t* emu) {
+    auto* dst = reinterpret_cast<char*>(reg_rcx(emu));
+    auto* sz = reinterpret_cast<uint32_t*>(reg_rdx(emu));
+    static const char kHost[] = "MOBIRO-ARM64";
+    constexpr uint32_t kLen = sizeof(kHost) - 1;
+    if (!sz) { reg_rax(emu) = 0ULL; return; }
+    if (dst && *sz > kLen) std::memcpy(dst, kHost, kLen + 1);
+    *sz = kLen;
+    reg_rax(emu) = 1ULL;
+}
+
+void thunk_GetComputerNameW(x64emu_t* emu) {
+    auto* dst = reinterpret_cast<uint16_t*>(reg_rcx(emu));
+    auto* sz = reinterpret_cast<uint32_t*>(reg_rdx(emu));
+    const std::u16string u = u"MOBIRO-ARM64";
+    if (!sz) { reg_rax(emu) = 0ULL; return; }
+    if (dst && *sz > u.size()) {
+        std::memcpy(dst, u.data(), u.size() * 2);
+        dst[u.size()] = 0;
+    }
+    *sz = static_cast<uint32_t>(u.size());
+    reg_rax(emu) = 1ULL;
+}
+
+void thunk_RtlGenRandom(x64emu_t* emu) {
+    auto* dst = reinterpret_cast<uint8_t*>(reg_rcx(emu));
+    const uint32_t len = static_cast<uint32_t>(reg_rdx(emu));
+    if (!dst) { reg_rax(emu) = 0ULL; return; }
+    static std::atomic<uint64_t> state{0x9E3779B97F4A7C15ULL};
+    for (uint32_t i = 0; i < len; ++i) {
+        uint64_t x = state.fetch_add(0x9E3779B97F4A7C15ULL, std::memory_order_relaxed);
+        x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+        dst[i] = static_cast<uint8_t>(x >> 31);
+    }
+    reg_rax(emu) = 1ULL;
+}
+
+void thunk_GetEnvironmentStringsA(x64emu_t* emu) {
+    static const char kEnv[] = "PATH=C:\\Windows\\System32\0\0";
+    reg_rax(emu) = reinterpret_cast<uintptr_t>(kEnv);
+}
+
+void thunk_PathFileExistsA(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    const auto* path = reinterpret_cast<const char*>(reg_rcx(emu));
+    std::string host;
+    reg_rax(emu) = (b && b->vfs() && path && b->vfs()->resolve(path, host)) ? 1ULL : 0ULL;
+}
+
+void thunk_PathFileExistsW(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    const auto* path = reinterpret_cast<const uint16_t*>(reg_rcx(emu));
+    std::string host;
+    reg_rax(emu) = (b && b->vfs() && path && b->vfs()->resolve(win32::utf16le_to_utf8(path), host)) ? 1ULL : 0ULL;
+}
+
 void thunk_XInputGetCapabilities(x64emu_t* emu) {
     const uint32_t user_idx = static_cast<uint32_t>(reg_rcx(emu));
     auto* caps = reinterpret_cast<uint8_t*>(reg_r8(emu));
@@ -2857,6 +2924,70 @@ void Box64Bridge::register_default_win32_thunks() {
     register_thunk("advapi32.dll", "RegCreateKeyExW", &thunk_RegNotFound);
     register_thunk("advapi32.dll", "RegSetValueExA", &thunk_ReturnZero);
     register_thunk("advapi32.dll", "RegSetValueExW", &thunk_ReturnZero);
+    register_thunk("advapi32.dll", "RegOpenKeyA", &thunk_RegNotFound);
+    register_thunk("advapi32.dll", "RegOpenKeyW", &thunk_RegNotFound);
+    register_thunk("advapi32.dll", "RegQueryValueA", &thunk_RegNotFound);
+    register_thunk("advapi32.dll", "RegQueryValueW", &thunk_RegNotFound);
+    register_thunk("advapi32.dll", "RegQueryInfoKeyA", &thunk_RegNotFound);
+    register_thunk("advapi32.dll", "RegQueryInfoKeyW", &thunk_RegNotFound);
+    register_thunk("advapi32.dll", "RegEnumKeyExA", &thunk_RegNotFound);
+    register_thunk("advapi32.dll", "RegEnumKeyExW", &thunk_RegNotFound);
+    register_thunk("advapi32.dll", "RegEnumValueA", &thunk_RegNotFound);
+    register_thunk("advapi32.dll", "RegEnumValueW", &thunk_RegNotFound);
+    register_thunk("advapi32.dll", "RegDeleteKeyA", &thunk_ReturnZero);
+    register_thunk("advapi32.dll", "RegDeleteKeyW", &thunk_ReturnZero);
+    register_thunk("advapi32.dll", "RegDeleteValueA", &thunk_ReturnZero);
+    register_thunk("advapi32.dll", "RegDeleteValueW", &thunk_ReturnZero);
+    register_thunk("advapi32.dll", "RegFlushKey", &thunk_ReturnZero);
+    register_thunk("advapi32.dll", "OpenProcessToken", &thunk_ReturnZero);
+    register_thunk("advapi32.dll", "GetTokenInformation", &thunk_ReturnZero);
+    register_thunk("advapi32.dll", "CryptAcquireContextA", &thunk_ReturnTrue);
+    register_thunk("advapi32.dll", "CryptAcquireContextW", &thunk_ReturnTrue);
+    register_thunk("advapi32.dll", "CryptReleaseContext", &thunk_ReturnTrue);
+    register_thunk("advapi32.dll", "SystemFunction036", &thunk_RtlGenRandom);
+    register_thunk("kernel32.dll", "IsBadReadPtr", &thunk_IsBadPtr);
+    register_thunk("kernel32.dll", "IsBadWritePtr", &thunk_IsBadPtr);
+    register_thunk("kernel32.dll", "IsBadCodePtr", &thunk_IsBadPtr);
+    register_thunk("kernel32.dll", "IsBadStringPtrA", &thunk_IsBadPtr);
+    register_thunk("kernel32.dll", "IsBadStringPtrW", &thunk_IsBadPtr);
+    register_thunk("kernel32.dll", "IsWow64Process", &thunk_IsWow64Process);
+    register_thunk("kernel32.dll", "GetComputerNameA", &thunk_GetComputerNameA);
+    register_thunk("kernel32.dll", "GetComputerNameW", &thunk_GetComputerNameW);
+    register_thunk("kernel32.dll", "GetEnvironmentStrings", &thunk_GetEnvironmentStringsA);
+    register_thunk("kernel32.dll", "GetEnvironmentStringsA", &thunk_GetEnvironmentStringsA);
+    register_thunk("kernel32.dll", "FreeEnvironmentStringsA", &thunk_ReturnTrue);
+    register_thunk("kernel32.dll", "CreateToolhelp32Snapshot", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "Process32First", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "Process32FirstW", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "Process32Next", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "Process32NextW", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "Module32First", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "Module32FirstW", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "Module32Next", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "Module32NextW", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "Thread32First", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "Thread32Next", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "SetDllDirectoryA", &thunk_ReturnTrue);
+    register_thunk("kernel32.dll", "SetDllDirectoryW", &thunk_ReturnTrue);
+    register_thunk("kernel32.dll", "DebugBreak", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "GetPriorityClass", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "SetPriorityClass", &thunk_ReturnTrue);
+    register_thunk("kernel32.dll", "DeviceIoControl", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "CancelIo", &thunk_ReturnTrue);
+    register_thunk("kernel32.dll", "CancelIoEx", &thunk_ReturnTrue);
+    register_thunk("kernel32.dll", "GetOverlappedResult", &thunk_ReturnZero);
+    register_thunk("shlwapi.dll", "PathFileExistsA", &thunk_PathFileExistsA);
+    register_thunk("shlwapi.dll", "PathFileExistsW", &thunk_PathFileExistsW);
+    register_thunk("psapi.dll", "EnumProcesses", &thunk_ReturnZero);
+    register_thunk("psapi.dll", "EnumProcessModules", &thunk_ReturnZero);
+    register_thunk("psapi.dll", "GetModuleInformation", &thunk_ReturnZero);
+    register_thunk("psapi.dll", "GetProcessMemoryInfo", &thunk_ReturnZero);
+    register_thunk("version.dll", "GetFileVersionInfoSizeA", &thunk_ReturnZero);
+    register_thunk("version.dll", "GetFileVersionInfoSizeW", &thunk_ReturnZero);
+    register_thunk("version.dll", "GetFileVersionInfoA", &thunk_ReturnZero);
+    register_thunk("version.dll", "GetFileVersionInfoW", &thunk_ReturnZero);
+    register_thunk("version.dll", "VerQueryValueA", &thunk_ReturnZero);
+    register_thunk("version.dll", "VerQueryValueW", &thunk_ReturnZero);
     register_thunk("shell32.dll", "ShellExecuteW", &thunk_ReturnZero);
 
     register_sekiro_compat_thunks(*this);
