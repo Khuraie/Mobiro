@@ -6,6 +6,15 @@
 
 ## Log Entries
 
+### Increment 11 — M9: Native AArch64 DXVK Green (All 3 Upstream Layers Verified) & Bundled Full-Stack APK Workflow (2026-11-27)
+- **Status:** Implemented & verified on GitHub Actions NDK `27.2.12479018`
+- **Changes:**
+  - Initialized DXVK's official Khronos/subproject submodules (`SPIRV-Headers`, `Vulkan-Headers`, `libdisplay-info`, `dxbc-spirv`) in `scripts/fetch_third_party.{sh,ps1}` and isolated `pkg-config = 'false'` in `scripts/build_dxvk_android.sh` (commit `286269f`).
+  - Verified **native AArch64 DXVK (`libdxvk_d3d11.so` + `libdxvk_dxgi.so`) compiled cleanly and uploaded artifacts** in 2m49s on GitHub Actions (Run `45864612958`) — completing from-source `arm64-v8a` cross-build verification for all three upstream open-source pillars (**Box64** + **Mesa Turnip** + **Native AArch64 DXVK**).
+  - Upgraded `.github/workflows/build-third-party.yml` to default `build_dxvk: true` and added `assemble_bundled_apk: true`, assembling and uploading a complete sideloadable `mobiro-arm64-bundled-debug-apk` packaging `libsekiro_runtime.so`, `libvulkan_freedreno.so`, `libdxvk_d3d11.so`, and `libdxvk_dxgi.so`.
+
+---
+
 ### Increment 10 — M8: Mesa Turnip `arm64-v8a` Green, Generated Win64→ARM64 D3D11/DXGI COM Bridge, Extended Win32/DirectInput8 Shims, Vulkan HUD Draw Pass & `spirv-val` CI (2026-11-27)
 - **Commit:** `eaa92c2` (CI Run `45864147018` — Linux GCC tests + Khronos `spirv-val` 37s, Android ARM64 APK 1m24s)
 - **Status:** Implemented & verified (local MSVC 2022 + GitHub Actions Linux GCC + `spirv-val` + Android ARM64 NDK)
