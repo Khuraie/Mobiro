@@ -2,6 +2,7 @@
 
 #include "guest_arena.hpp"
 #include "win32_file_sync.hpp"
+#include "win32_proc_sync.hpp"
 #include "win64_teb.hpp"
 #include "../validator/vfs_mapper.hpp"
 
@@ -59,6 +60,9 @@ public:
     const validator::VfsMapper* vfs() const { return vfs_; }
     win32::FileHandleTable& files() { return files_; }
     win32::SrwLockTable& srw_locks() { return srw_locks_; }
+    win32::GuestHeap& heap() { return heap_; }
+    win32::EventTable& events() { return events_; }
+    win32::SehUnwindRegistry& seh() { return seh_; }
     void set_main_module_base(uintptr_t base) { main_module_base_ = base; }
     uintptr_t main_module_base() const { return main_module_base_; }
     void set_main_teb(Win64Teb* teb) { main_teb_ = teb; }
@@ -75,6 +79,9 @@ private:
     const validator::VfsMapper* vfs_ = nullptr;
     win32::FileHandleTable files_;
     win32::SrwLockTable srw_locks_;
+    win32::GuestHeap heap_;
+    win32::EventTable events_;
+    win32::SehUnwindRegistry seh_;
     uintptr_t main_module_base_ = 0;
     Win64Teb* main_teb_ = nullptr;
     uint32_t next_tls_slot_ = 0;

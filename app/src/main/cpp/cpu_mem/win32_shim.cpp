@@ -163,7 +163,111 @@ void thunk_GetFileSizeEx(x64emu_t* emu) {
 void thunk_CloseHandle(x64emu_t* emu) {
     auto* bridge = Box64Bridge::instance();
     if (!bridge) { reg_rax(emu) = 0; return; }
-    reg_rax(emu) = bridge->files().close_handle(reg_rcx(emu)) ? 1ULL : 0ULL;
+    const uint64_t h = reg_rcx(emu);
+    if (bridge->events().is_event_handle(h)) {
+        reg_rax(emu) = bridge->events().close(h) ? 1ULL : 0ULL;
+    } else {
+        reg_rax(emu) = bridge->files().close_handle(h) ? 1ULL : 0ULL;
+    }
+}
+
+// --- Process Heap (MSVC CRT / malloc backing) ---
+
+void thunk_GetProcessHeap(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    reg_rax(emu) = b ? b->heap().handle() : 0ULL;
+}
+
+void thunk_HeapAlloc(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    if (!b) { reg_rax(emu) = 0; return; }
+    const uint32_t flags = static_cast<uint32_t>(reg_rdx(emu));
+    const size_t bytes = static_cast<size_t>(reg_r8(emu));
+    reg_rax(emu) = b->heap().alloc(bytes, (flags & 0x08u) != 0); // HEAP_ZERO_MEMORY
+}
+
+void thunk_HeapReAlloc(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    if (!b) { reg_rax(emu) = 0; return; }
+    const uint32_t flags = static_cast<uint32_t>(reg_rdx(emu));
+    const uintptr_t old_ptr = static_cast<uintptr_t>(reg_r8(emu));
+    const size_t bytes = static_cast<size_t>(reg_r9(emu));
+    reg_rax(emu) = b->heap().realloc(old_ptr, bytes, (flags & 0x08u) != 0);
+}
+
+void thunk_HeapFree(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    if (!b) { reg_rax(emu) = 0; return; }
+    reg_rax(emu) = b->heap().free(static_cast<uintptr_t>(reg_r8(emu))) ? 1ULL : 0ULL;
+}
+
+void thunk_HeapSize(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    if (!b) { reg_rax(emu) = ~0ULL; return; }
+    reg_rax(emu) = b->heap().size_of(static_cast<uintptr_t>(reg_r8(emu)));
+}
+
+// --- Events & Wait ---
+
+void thunk_CreateEventW(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    if (!b) { reg_rax(emu) = 0; return; }
+    const bool manual_reset = reg_rdx(emu) != 0;
+    const bool initial_state = reg_r8(emu) != 0;
+    reg_rax(emu) = b->events().create_event(manual_reset, initial_state);
+}
+
+void thunk_SetEvent(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    reg_rax(emu) = (b && b->events().set_event(reg_rcx(emu))) ? 1ULL : 0ULL;
+}
+
+void thunk_ResetEvent(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    reg_rax(emu) = (b && b->events().reset_event(reg_rcx(emu))) ? 1ULL : 0ULL;
+}
+
+void thunk_WaitForSingleObject(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    if (!b) { reg_rax(emu) = win32::EventTable::kWaitFailed; return; }
+    reg_rax(emu) = b->events().wait_single(reg_rcx(emu), static_cast<uint32_t>(reg_rdx(emu)));
+}
+
+// --- Error state, SystemInfo & SEH Unwind ---
+
+void thunk_GetLastError(x64emu_t* emu) {
+    auto* teb = current_teb(emu);
+    reg_rax(emu) = teb ? teb->last_error : 0ULL;
+}
+
+void thunk_SetLastError(x64emu_t* emu) {
+    auto* teb = current_teb(emu);
+    if (teb) teb->last_error = static_cast<uint32_t>(reg_rcx(emu));
+}
+
+void thunk_GetSystemInfo(x64emu_t* emu) {
+    auto* out = reinterpret_cast<win32::Win64SystemInfo*>(reg_rcx(emu));
+    if (!out) return;
+    win32::Win64SystemInfo si{};
+    if (auto* teb = current_teb(emu)) {
+        if (teb->peb_ptr) {
+            const auto* peb = reinterpret_cast<const Win64Peb*>(teb->peb_ptr);
+            si.number_of_processors = peb->number_of_processors;
+            si.active_processor_mask = (peb->number_of_processors >= 64)
+                ? ~0ULL
+                : ((1ULL << peb->number_of_processors) - 1ULL);
+        }
+    }
+    *out = si;
+}
+
+void thunk_RtlLookupFunctionEntry(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    if (!b) { reg_rax(emu) = 0; return; }
+    const uintptr_t control_pc = static_cast<uintptr_t>(reg_rcx(emu));
+    auto* out_image_base = reinterpret_cast<uintptr_t*>(reg_rdx(emu));
+    const auto* entry = b->seh().lookup(control_pc, out_image_base);
+    reg_rax(emu) = reinterpret_cast<uintptr_t>(entry);
 }
 
 // --- Sync, Timing, TLS & Process Metadata ---
@@ -286,6 +390,7 @@ bool Box64Bridge::initialize(mem::GuestArena* arena, const validator::VfsMapper*
     stub_pool_ = new NativeBridgeStub[kMaxStubs];
 #endif
     stub_count_ = 0;
+    heap_.initialize(arena_, 32 * 1024 * 1024);
     register_default_win32_thunks();
     return true;
 }
@@ -293,6 +398,8 @@ bool Box64Bridge::initialize(mem::GuestArena* arena, const validator::VfsMapper*
 void Box64Bridge::shutdown() {
     files_.close_all();
     srw_locks_.clear();
+    events_.clear();
+    heap_.reset();
     if (stub_pool_) {
 #if defined(__linux__) || defined(__ANDROID__)
         munmap(stub_pool_, kMaxStubs * sizeof(NativeBridgeStub));
@@ -354,6 +461,25 @@ void Box64Bridge::register_default_win32_thunks() {
     register_thunk("kernel32.dll", "GetCurrentThreadId", &thunk_GetCurrentThreadId);
     register_thunk("kernel32.dll", "GetCurrentProcessId", &thunk_GetCurrentProcessId);
     register_thunk("kernel32.dll", "GetModuleHandleW", &thunk_GetModuleHandleW);
+    register_thunk("kernel32.dll", "GetLastError", &thunk_GetLastError);
+    register_thunk("kernel32.dll", "SetLastError", &thunk_SetLastError);
+    register_thunk("kernel32.dll", "GetSystemInfo", &thunk_GetSystemInfo);
+
+    // Heap & Events
+    register_thunk("kernel32.dll", "GetProcessHeap", &thunk_GetProcessHeap);
+    register_thunk("kernel32.dll", "HeapAlloc", &thunk_HeapAlloc);
+    register_thunk("kernel32.dll", "HeapReAlloc", &thunk_HeapReAlloc);
+    register_thunk("kernel32.dll", "HeapFree", &thunk_HeapFree);
+    register_thunk("kernel32.dll", "HeapSize", &thunk_HeapSize);
+    register_thunk("kernel32.dll", "CreateEventW", &thunk_CreateEventW);
+    register_thunk("kernel32.dll", "CreateEventA", &thunk_CreateEventW);
+    register_thunk("kernel32.dll", "SetEvent", &thunk_SetEvent);
+    register_thunk("kernel32.dll", "ResetEvent", &thunk_ResetEvent);
+    register_thunk("kernel32.dll", "WaitForSingleObject", &thunk_WaitForSingleObject);
+
+    // SEH Unwind (ntdll + kernel32 forwarder)
+    register_thunk("kernel32.dll", "RtlLookupFunctionEntry", &thunk_RtlLookupFunctionEntry);
+    register_thunk("ntdll.dll", "RtlLookupFunctionEntry", &thunk_RtlLookupFunctionEntry);
 
     // Input
     register_thunk("xinput1_4.dll", "XInputGetState", &thunk_XInputGetState);

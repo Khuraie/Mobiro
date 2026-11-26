@@ -1,5 +1,6 @@
 #include "cpu_mem/box64_bridge.hpp"
 #include "cpu_mem/guest_arena.hpp"
+#include "cpu_mem/guest_executor.hpp"
 #include "cpu_mem/pe_loader.hpp"
 #include "cpu_mem/win64_teb.hpp"
 #include "gfx/dxvk_config_gen.hpp"
@@ -316,12 +317,171 @@ void test_dxvk_config_and_topology() {
     assert(topo.perf_cores.size() == 5);
 }
 
+// End-to-end test: builds a real executable PE32+ image containing x86_64 machine code
+// that reads GS:[0x30] (TEB*), calls IAT-patched GetProcessHeap and HeapAlloc, and returns
+// the newly allocated guest pointer in RAX, plus exercises Event, SystemInfo, and SEH .pdata.
+void test_x86_64_guest_execution_and_seh() {
+    const fs::path tmp = fs::temp_directory_path() / "mobiro_test_exec";
+    fs::remove_all(tmp);
+    fs::create_directories(tmp);
+    const fs::path exe_path = tmp / "guest_probe.exe";
+
+    // Layout:
+    //   Section 0 (.text,  RVA 0x1000, Raw 0x400): x86_64 entry code
+    //   Section 1 (.rdata, RVA 0x2000, Raw 0x800): Import Directory + IAT + .pdata entry
+    std::vector<uint8_t> img(0xC00, 0);
+    img[0] = 'M'; img[1] = 'Z';
+    const uint32_t pe_off = 0x80;
+    wr32(img, 0x3C, pe_off);
+    img[pe_off] = 'P'; img[pe_off + 1] = 'E';
+
+    const size_t coff = pe_off + 4;
+    wr16(img, coff + 0, 0x8664);
+    wr16(img, coff + 2, 2); // 2 sections
+    const uint16_t opt_size = 0xF0;
+    wr16(img, coff + 16, opt_size);
+
+    const size_t opt = coff + 20;
+    wr16(img, opt + 0, 0x020B);
+    wr32(img, opt + 16, 0x1000);                // EntryPoint = .text+0
+    wr64(img, opt + 24, 0x0000000140000000ULL);
+    wr32(img, opt + 56, 0x3000);                // SizeOfImage
+    wr32(img, opt + 60, 0x400);                 // SizeOfHeaders
+    wr32(img, opt + 108, 16);
+    wr32(img, opt + 112 + 1 * 8, 0x2000);       // Import RVA
+    wr32(img, opt + 112 + 1 * 8 + 4, 40);       // Import Size
+    wr32(img, opt + 112 + 3 * 8, 0x2300);       // Exception (.pdata) RVA
+    wr32(img, opt + 112 + 3 * 8 + 4, 12);       // 1 RUNTIME_FUNCTION entry
+
+    const size_t sec0 = opt + opt_size;
+    std::memcpy(&img[sec0], ".text", 5);
+    wr32(img, sec0 + 8, 0x400);  wr32(img, sec0 + 12, 0x1000);
+    wr32(img, sec0 + 16, 0x400); wr32(img, sec0 + 20, 0x400);
+    wr32(img, sec0 + 36, 0x60000020u); // READ | EXEC | CODE
+
+    const size_t sec1 = sec0 + 40;
+    std::memcpy(&img[sec1], ".rdata", 6);
+    wr32(img, sec1 + 8, 0x400);  wr32(img, sec1 + 12, 0x2000);
+    wr32(img, sec1 + 16, 0x400); wr32(img, sec1 + 20, 0x800);
+    wr32(img, sec1 + 36, 0x40000040u); // READ
+
+    // Import descriptor for kernel32.dll: GetProcessHeap (IAT @ 0x2140), HeapAlloc (IAT @ 0x2148)
+    wr32(img, 0x800 + 0,  0x2100); // OriginalFirstThunk
+    wr32(img, 0x800 + 12, 0x2080); // Name RVA
+    wr32(img, 0x800 + 16, 0x2140); // FirstThunk (IAT)
+    std::memcpy(&img[0x880], "kernel32.dll", 13);
+    wr64(img, 0x900, 0x2200);
+    wr64(img, 0x908, 0x2220);
+    std::memcpy(&img[0xA00 + 2], "GetProcessHeap", 15);
+    std::memcpy(&img[0xA20 + 2], "HeapAlloc", 10);
+
+    // .pdata entry at RVA 0x2300 (file off 0xB00): covers [0x1000, 0x1080)
+    wr32(img, 0xB00 + 0, 0x1000);
+    wr32(img, 0xB00 + 4, 0x1080);
+    wr32(img, 0xB00 + 8, 0x2320);
+
+    // Emit real x86_64 machine code at .text (RVA 0x1000, file offset 0x400):
+    //   0x1000: 48 83 EC 28                 sub rsp, 0x28          (shadow space + alignment)
+    //   0x1004: 65 48 8B 04 25 30 00 00 00  mov rax, gs:[0x30]     (read TEB self_ptr)
+    //   0x100D: FF 15 2D 11 00 00           call [rip + 0x112D]    (0x1013 + 0x112D = 0x2140 GetProcessHeap)
+    //   0x1013: 48 89 C1                    mov rcx, rax           (hHeap)
+    //   0x1016: 48 BA 08 00 00 00 00 00 00 00 mov rdx, 8           (HEAP_ZERO_MEMORY)
+    //   0x1020: 49 B8 00 01 00 00 00 00 00 00 mov r8, 256          (dwBytes = 256)
+    //   0x102A: FF 15 18 11 00 00           call [rip + 0x1118]    (0x1030 + 0x1118 = 0x2148 HeapAlloc)
+    //   0x1030: 48 83 C4 28                 add rsp, 0x28
+    //   0x1034: C3                          ret
+    const uint8_t code[] = {
+        0x48, 0x83, 0xEC, 0x28,
+        0x65, 0x48, 0x8B, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00,
+        0xFF, 0x15, 0x2D, 0x11, 0x00, 0x00,
+        0x48, 0x89, 0xC1,
+        0x48, 0xBA, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x49, 0xB8, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0xFF, 0x15, 0x18, 0x11, 0x00, 0x00,
+        0x48, 0x83, 0xC4, 0x28,
+        0xC3
+    };
+    std::memcpy(&img[0x400], code, sizeof(code));
+
+    {
+        std::ofstream f(exe_path, std::ios::binary | std::ios::trunc);
+        f.write(reinterpret_cast<const char*>(img.data()), static_cast<std::streamsize>(img.size()));
+    }
+
+    mobiro::validator::VfsMapper vfs;
+    assert(vfs.index_root(tmp.string()));
+    mobiro::mem::GuestArena arena;
+    assert(arena.reserve(0x0000000100000000ULL, 128ULL * 1024 * 1024));
+    mobiro::cpu::Box64Bridge bridge;
+    assert(bridge.initialize(&arena, &vfs));
+
+    auto loaded = mobiro::cpu::PeLoader::load_pe64(exe_path.string(), arena, bridge, true);
+    assert(loaded.ok && loaded.imports_resolved == 2 && loaded.pdata_size == 12);
+    bridge.seh().register_image(loaded.mapped_base, loaded.pdata_va, loaded.pdata_size);
+
+    mobiro::cpu::Win64ThreadEnv tenv;
+    assert(tenv.init_main_thread(arena, loaded.mapped_base, 8, 9001, 9002));
+    bridge.set_main_teb(tenv.teb);
+
+    // Execute real x86_64 machine code from entry point
+    auto exec = mobiro::cpu::GuestExecutor::run_entry(loaded, tenv, bridge);
+    assert(exec.ok);
+    assert(exec.thunks_dispatched == 2);
+    assert(exec.exit_rax != 0);
+    assert(arena.contains(static_cast<uintptr_t>(exec.exit_rax), 256));
+
+    // Verify RtlLookupFunctionEntry resolves our .pdata entry
+    x64emu_t emu{};
+    emu.gs_base = reinterpret_cast<uint64_t>(tenv.teb);
+    uintptr_t out_base = 0;
+    emu.rcx = loaded.entry_point + 0x10;
+    emu.rdx = reinterpret_cast<uint64_t>(&out_base);
+    assert(bridge.invoke_thunk("ntdll.dll", "RtlLookupFunctionEntry", &emu));
+    assert(emu.rax != 0 && out_base == loaded.mapped_base);
+
+    // Verify Event create/wait-timeout/set/wait-signaled/close + GetSystemInfo + LastError
+    emu.rcx = 0; emu.rdx = 1; emu.r8 = 0; // manual_reset=true, initial=false
+    assert(bridge.invoke_thunk("kernel32.dll", "CreateEventW", &emu));
+    const uint64_t hev = emu.rax;
+    assert(hev != 0);
+
+    emu.rcx = hev; emu.rdx = 5; // 5ms timeout -> WAIT_TIMEOUT
+    assert(bridge.invoke_thunk("kernel32.dll", "WaitForSingleObject", &emu));
+    assert(emu.rax == mobiro::win32::EventTable::kWaitTimeout);
+
+    emu.rcx = hev;
+    assert(bridge.invoke_thunk("kernel32.dll", "SetEvent", &emu));
+    assert(emu.rax == 1);
+
+    emu.rcx = hev; emu.rdx = 50;
+    assert(bridge.invoke_thunk("kernel32.dll", "WaitForSingleObject", &emu));
+    assert(emu.rax == mobiro::win32::EventTable::kWaitObject0);
+
+    emu.rcx = hev;
+    assert(bridge.invoke_thunk("kernel32.dll", "CloseHandle", &emu));
+    assert(emu.rax == 1);
+
+    mobiro::win32::Win64SystemInfo si{};
+    emu.rcx = reinterpret_cast<uint64_t>(&si);
+    assert(bridge.invoke_thunk("kernel32.dll", "GetSystemInfo", &emu));
+    assert(si.page_size == 4096 && si.allocation_granularity == 65536 && si.number_of_processors == 8);
+
+    emu.rcx = 1234;
+    assert(bridge.invoke_thunk("kernel32.dll", "SetLastError", &emu));
+    assert(bridge.invoke_thunk("kernel32.dll", "GetLastError", &emu));
+    assert(emu.rax == 1234);
+
+    bridge.shutdown();
+    fs::remove_all(tmp);
+}
+
 } // namespace
 
 int main() {
     test_byof_validator_and_vfs();
     test_pe_loader_teb_and_win32_thunks();
     test_dxvk_config_and_topology();
+    test_x86_64_guest_execution_and_seh();
     std::cout << "All Mobiro core unit tests passed.\n";
     return 0;
 }

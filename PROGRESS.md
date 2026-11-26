@@ -6,7 +6,18 @@
 
 ## Log Entries
 
+### Increment 3 — M1-b: Guest Executor, SEH `.pdata` Unwind Registry, Win32 Heap/Events & Box64 Build Script (2026-11-27)
+- **Status:** Implemented & verified (local MSVC 2022 + GitHub Actions Linux GCC & Android ARM64 NDK)
+- **Changes:**
+  - Implemented `GuestHeap`, `EventTable`, `Win64SystemInfo`, and `SehUnwindRegistry` (`app/src/main/cpp/cpu_mem/win32_proc_sync.hpp`), adding `GetProcessHeap`, `HeapAlloc`, `HeapReAlloc`, `HeapFree`, `HeapSize`, `CreateEventW`/`A`, `SetEvent`, `ResetEvent`, `WaitForSingleObject`, unified `CloseHandle`, `GetLastError`/`SetLastError`, `GetSystemInfo`, and `RtlLookupFunctionEntry`.
+  - Implemented `GuestExecutor` (`app/src/main/cpp/cpu_mem/guest_executor.hpp`) setting up Win64 16-byte stack alignment + `GS`/TEB binding, with both the embedded Box64 integration hook (`MOBIRO_HAVE_BOX64`) and a built-in x86_64 smoke-test dispatcher for CI end-to-end verification of `GS:[0x30]` reads and indirect IAT `CALL [RIP+disp32]` trampolines.
+  - Added transparent Android NDK `arm64-v8a` cross-build script for upstream Box64 (`scripts/build_box64_android.sh`).
+  - Wired `.pdata` SEH registration into `runtime_main.cpp` and added `test_x86_64_guest_execution_and_seh` in `tests/test_core.cpp` executing real x86_64 machine code from a loaded PE32+ image through IAT-patched `GetProcessHeap` + `HeapAlloc`.
+
+---
+
 ### Increment 2 — M1 Core: PE64 Loader, Win64 TEB/PEB & Win32 VFS File/Sync Shims (2026-11-27)
+- **Commit:** `156caa9` (CI Run `45855341708` — Linux GCC tests 11s, Android ARM64 APK 1m15s)
 - **Status:** Implemented & verified (local MSVC 2022 + GitHub Actions Linux GCC & Android ARM64 NDK)
 - **Changes:**
   - Upgraded `GuestArena` (`app/src/main/cpp/cpu_mem/guest_arena.hpp`) with portable `MemProt` flags and real OS virtual memory backing on both Android (`mmap`/`mprotect`/`madvise`) and Windows hosts (`VirtualAlloc`/`VirtualProtect`/`VirtualFree`).
@@ -33,7 +44,6 @@
 ---
 
 ## Upcoming Increments
-- **Increment 3 (M1-b):** Build script & CMake integration for embedded upstream `box64` (`arm64-v8a`), Win64 `GS` register binding, and guest entry-point dispatch test harness.
-- **Increment 4 (M2):** Cross-compile native AArch64 `DXVK` + `Mesa Turnip` (`libvulkan_freedreno.so`) from source and bind `D3D11CreateDevice`/`CreateDXGIFactory1` thunks to `ANativeWindow` + `SwappyVk`.
-- **Increment 5 (M3):** Win32 thread creation (`CreateThread` + `ThreadBalancer` auto-classification), `WaitOnAddress`/Event futex sync, and `XAudio2` → `AAudio` bridge.
+- **Increment 4 (M2):** Cross-compile native AArch64 `DXVK` + `Mesa Turnip` (`libvulkan_freedreno.so`) from source, add `dxvk_interop.cpp` (`ANativeWindow` → `VK_KHR_android_surface` + `SwappyVk`), and wire `D3D11CreateDevice`/`CreateDXGIFactory1` thunks.
+- **Increment 5 (M3):** Win32 `CreateThread` + `ThreadBalancer` auto-classification, writable save-game VFS overlay, `WaitOnAddress` futex sync, and `XAudio2` → `AAudio` bridge.
 - **Increment 6 (M4):** In-swapchain Vulkan touch HUD overlay and GPL pipeline pre-warming.

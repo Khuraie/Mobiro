@@ -157,6 +157,10 @@ Java_com_mobiro_runtime_MainActivity_nativeConfigureAndValidate(
         return env->NewStringUTF(g_rt.pe_image.error.c_str());
     }
     g_rt.box64.set_main_module_base(g_rt.pe_image.mapped_base);
+    if (g_rt.pe_image.pdata_va && g_rt.pe_image.pdata_size) {
+        g_rt.box64.seh().register_image(
+            g_rt.pe_image.mapped_base, g_rt.pe_image.pdata_va, g_rt.pe_image.pdata_size);
+    }
 
     const uint32_t cpus = static_cast<uint32_t>(sysconf(_SC_NPROCESSORS_CONF));
     if (!g_rt.main_thread_env.init_main_thread(
