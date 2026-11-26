@@ -1,0 +1,39 @@
+name: Mobiro CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  host-core-tests:
+    name: C++20 Core Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure & Build Core Tests
+        run: |
+          cmake -S app/src/main/cpp -B build-host -DMOBIRO_BUILD_HOST_TESTS=ON -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-host --parallel
+      - name: Run Core Tests
+        run: ctest --test-dir build-host --output-on-failure
+
+  android-ndk-build:
+    name: Android ARM64 NDK Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@v3
+      - name: Install NDK & CMake
+        run: |
+          sdkmanager "ndk;27.2.12479018" "cmake;3.22.1" "platforms;android-35" "build-tools;35.0.0"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.10.2
+      - name: Assemble Debug APK (arm64-v8a)
+        run: gradle :app:assembleDebug --no-daemon
