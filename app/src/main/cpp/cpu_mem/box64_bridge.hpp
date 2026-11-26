@@ -25,6 +25,7 @@ float mobiro_box64_xmm_f32(const x64emu_t* emu, int xmm_idx);
 uintptr_t mobiro_box64_teb(const x64emu_t* emu);
 void mobiro_box64_ensure_init(void);
 void mobiro_box64_set_prot(uintptr_t addr, size_t size, int mobiro_prot);
+void mobiro_box64_request_quit(x64emu_t* emu);
 int mobiro_box64_call_fn(uintptr_t fn_va,
                          uint64_t rcx,
                          uint64_t rdx,
@@ -130,6 +131,13 @@ inline uintptr_t emu_teb_va(const x64emu_t* e) {
     return mobiro_box64_teb(e);
 #else
     return static_cast<uintptr_t>(e->gs_base);
+#endif
+}
+inline void emu_request_quit(x64emu_t* e) {
+#ifdef MOBIRO_HAVE_BOX64
+    mobiro_box64_request_quit(e);
+#else
+    (void)e;
 #endif
 }
 

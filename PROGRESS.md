@@ -6,6 +6,19 @@
 
 ## Log Entries
 
+### Increment 23 — M21: Live Snapdragon 8 Gen 2 (Honor Magic5 Pro) ARM64 Dynarec Bring-Up & 1,507-Call Real Win32 Execution Trace (2026-11-27)
+- **Status:** Implemented & verified live on Honor Magic5 Pro (`PGT-AN10`, Snapdragon 8 Gen 2 / Adreno 740, Android 16) + local MSVC 2022 tests (`0.17s`) + GitHub Actions fast bundled APK builds (`~90s`)
+- **Changes:**
+  - Fixed embedded Box64 ARM64 Dynarec initialization in `app/src/main/cpp/cpu_mem/box64_c_shim.c`: mirrored upstream `core.c::initialize()` (`box64_pagesize`, `ftrace`, `LoadEnvVariables()`, `InitializeSystemInfo()`, `DetectHostCpuFeatures()`, `loadProtectionFromMap()`, `SetupX64Emu()`, `ResetFlags()`, `thread_set_emu()`), resolving the initial `MAP_FAILED` `SIGSEGV` and `prot=0` faults.
+  - Wired `GuestArena` (`guest_arena.hpp`) and all `NativeBridgeStub` / COM proxy slabs (`box64_bridge.hpp`, `win32_shim.cpp`, `d3d11_com_bridge.hpp`, `xaudio2_com_bridge.hpp`, `win32_sekiro_compat.hpp`) directly into Box64's `setProtection()` via `mobiro_box64_set_prot`, enabling dynamic guest `VirtualAlloc`/`VirtualProtect` JIT/unpack execution on ARM64.
+  - Added GuestHeap-backed `msvcrt.dll`/`ucrtbase.dll` CRT thunks (`malloc`/`calloc`/`realloc`/`free`/`vsprintf`/`snprintf`/strings/stdio), `FileMappingStore` (`CreateFileMapping*`/`OpenFileMapping*`/`MapViewOfFile*`), `IsBad*Ptr`, `ntdll.dll` `Nt*`/`Zw*`/`Rtl*` thunks (`NtSetInformationThread`, `NtProtectVirtualMemory`, `NtAllocateVirtualMemory`, `RtlGetVersion`), clean guest quit (`mobiro_box64_request_quit` in `ExitProcess`/`TerminateProcess`), and proper `OpenProcess(pid==0) -> NULL`.
+  - Fixed a real path-resolution bug in `VfsMapper::strip_prefix` (`vfs_mapper.hpp`): stripped `\\?\` and canonical `sekiro/` virtual game-root prefixes so `CreateFileW("C:\Sekiro\Sekiro.exe")` resolves to the staged BYOF root.
+  - Added persistent `mobiro_boot.log` + opt-in `mobiro_box64.log` / `mobiro_api.log` diagnostics (`runtime_main.cpp`), throttled the idle `ALooper_pollOnce` loop, and cached a deterministic workspace `MOBIRO_DEBUG_KEYSTORE` (`build.gradle.kts`, `build-third-party.yml`) enabling 2-second in-place `adb install -r` updates without disturbing the staged 12.5 GB BYOF folder.
+  - **Live Hardware Telemetry (`AD3J023A18000309`):** Native AArch64 DXVK (`dxvk_native=1`) + Adreno 740 Vulkan (`libvulkan.so`) + `ANativeWindow` (`2848x1312`) bound cleanly; all 6 retail BYOF DLL `DllMain`s (`oo2core_6_win64.dll`, `bink2w64.dll`, `amd_ags_x64.dll`, `fmodex64.dll`, `fmod_event64.dll`, `steam_api64.dll`) executed under Box64 ARM64 Dynarec and returned `TRUE (rax=1)`; `sekiro.exe` executed `1,507` consecutive real Win32 API calls (unpacked dynamic code at `0x180000000`, opened & verified `C:\Sekiro\Sekiro.exe`) until the retail Steam wrapper queried `HKCU\Software\Valve\Steam\ActiveProcess` / `steamclient64.dll`, invoked `ShellExecuteA("steam://rungameid/814380")`, and cleanly requested exit (`TerminateProcess(-1, 0x35)`). (Clean-room BYOF: zero DRM bypasses.)
+  - Also diagnosed why bundled `libvulkan_freedreno.so` fell back to system Adreno 740 `libvulkan.so`: Android 16 app linker namespace `clns-9` blocks private `/system/lib64/libhardware.so`.
+
+---
+
 ### Increment 22 — M20: Full-Stack Bundled APK Green (`52.9 MB`, All 3 Upstream Layers + `MobiroTouchHud`) & Android 15 MuMu Smoke Test Fixes (2026-11-27)
 - **Status:** Implemented & verified (GitHub Actions full-stack Run `45885793713` PASS + Android 15 MuMu Player live install & launch)
 - **Changes:**

@@ -34,6 +34,10 @@ uintptr_t mobiro_box64_teb(const x64emu_t* emu) {
     return emu ? emu->segs_offs[_GS] : 0;
 }
 
+void mobiro_box64_request_quit(x64emu_t* emu) {
+    if (emu) emu->quit = 1;
+}
+
 // Native Box64 exit bridge (`0xCC 'S' 'C' 0ULL`): when a guest function returns here,
 // Box64's ARM64 Dynarec and x64Int3 set `emu->quit = 1` and cleanly return control to C.
 static const uint8_t g_box64_exit_stub[32] __attribute__((aligned(32))) = {

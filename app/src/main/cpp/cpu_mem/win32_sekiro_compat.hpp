@@ -597,7 +597,7 @@ inline void register_sekiro_compat_thunks(Box64Bridge& br) {
     br.register_thunk("kernel32.dll", "GetNumaHighestNodeNumber", &thunk_ReturnTrue);
     br.register_thunk("kernel32.dll", "OpenEventA", &thunk_ReturnZero);
     br.register_thunk("kernel32.dll", "PulseEvent", &thunk_SetEvent);
-    br.register_thunk("kernel32.dll", "OpenProcess", &thunk_GetCurrentProcess);
+    br.register_thunk("kernel32.dll", "OpenProcess", &thunk_OpenProcess);
     br.register_thunk("kernel32.dll", "OpenThread", &thunk_GetCurrentThread);
     br.register_thunk("kernel32.dll", "CreateWaitableTimerA", &thunk_CreateEventW);
     br.register_thunk("kernel32.dll", "SetWaitableTimer", &thunk_ReturnTrue);

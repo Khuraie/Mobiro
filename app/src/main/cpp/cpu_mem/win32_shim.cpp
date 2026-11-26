@@ -2191,6 +2191,32 @@ void thunk_RtlInitUnicodeString(x64emu_t* emu) {
     reg_rax(emu) = 0ULL;
 }
 
+void thunk_ExitProcess(x64emu_t* emu) {
+    reg_rax(emu) = reg_rcx(emu);
+    emu_request_quit(emu);
+}
+
+void thunk_TerminateProcess(x64emu_t* emu) {
+    const uint64_t hproc = reg_rcx(emu);
+    const uint64_t code = reg_rdx(emu);
+    if (hproc == ~0ULL || hproc == 0xFFFFFFFFULL) {
+        reg_rax(emu) = code;
+        emu_request_quit(emu);
+        return;
+    }
+    reg_rax(emu) = 1ULL;
+}
+
+void thunk_OpenProcess(x64emu_t* emu) {
+    const uint32_t pid = static_cast<uint32_t>(reg_r8(emu));
+    if (pid == 0) {
+        if (auto* teb = current_teb(emu)) teb->last_error = 87u; // ERROR_INVALID_PARAMETER
+        reg_rax(emu) = 0ULL;
+        return;
+    }
+    reg_rax(emu) = ~0ULL;
+}
+
 void thunk_XInputGetCapabilities(x64emu_t* emu) {
     const uint32_t user_idx = static_cast<uint32_t>(reg_rcx(emu));
     auto* caps = reinterpret_cast<uint8_t*>(reg_r8(emu));
@@ -2441,8 +2467,11 @@ extern "C" void mobiro_traced_import_wrapper(x64emu_t* emu, uintptr_t slot_ptr) 
                     extra = std::string(" ws=\"") + wide_preview(rcx) + "\"";
                 } else if (std::strstr(nm, "MessageBoxA") && rdx > 0xFFFF) {
                     extra = std::string(" msg=\"") + ascii_preview(rdx) + "\"";
-                } else if ((std::strstr(nm, "OpenEventA") || std::strstr(nm, "OpenFileMappingA")) && r8 > 0xFFFF) {
-                    extra = std::string(" name=\"") + ascii_preview(r8) + "\"";
+                } else if ((std::strstr(nm, "OpenEventA") || std::strstr(nm, "OpenFileMappingA") ||
+                            std::strstr(nm, "ShellExecuteA")) && r8 > 0xFFFF) {
+                    extra = std::string(" arg=\"") + ascii_preview(r8) + "\"";
+                } else if (std::strstr(nm, "OutputDebugStringA") && rcx > 0xFFFF) {
+                    extra = std::string(" dbg=\"") + ascii_preview(rcx) + "\"";
                 }
                 std::fprintf(fp, "[#%llu] ret=0x%llx %s(rcx=0x%llx, rdx=0x%llx, r8=0x%llx, r9=0x%llx)%s -> 0x%llx\n",
                              static_cast<unsigned long long>(seq),
@@ -2749,8 +2778,8 @@ void Box64Bridge::register_default_win32_thunks() {
     register_thunk("kernel32.dll", "GetCurrentDirectoryW", &thunk_GetCurrentDirectoryW);
     register_thunk("kernel32.dll", "SetCurrentDirectoryW", &thunk_ReturnTrue);
     register_thunk("kernel32.dll", "GetTempPathW", &thunk_GetTempPathW);
-    register_thunk("kernel32.dll", "ExitProcess", &thunk_ReturnZero);
-    register_thunk("kernel32.dll", "TerminateProcess", &thunk_ReturnTrue);
+    register_thunk("kernel32.dll", "ExitProcess", &thunk_ExitProcess);
+    register_thunk("kernel32.dll", "TerminateProcess", &thunk_TerminateProcess);
     register_thunk("ws2_32.dll", "WSAStartup", &thunk_ReturnZero);
     register_thunk("ws2_32.dll", "WSACleanup", &thunk_ReturnZero);
 
