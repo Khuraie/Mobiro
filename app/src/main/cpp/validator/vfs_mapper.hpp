@@ -118,9 +118,12 @@ public:
 
 private:
     static std::string strip_prefix(std::string key) {
+        if (key.rfind("//?/", 0) == 0 || key.rfind("//./", 0) == 0) key.erase(0, 4);
         if (key.size() >= 2 && key[1] == ':') key.erase(0, 2);
         while (!key.empty() && key.front() == '/') key.erase(0, 1);
         if (key.rfind("./", 0) == 0) key.erase(0, 2);
+        // Strip canonical virtual game-root prefix returned by GetModuleFileName/GetCurrentDirectory
+        if (key.rfind("sekiro/", 0) == 0) key.erase(0, 7);
         return key;
     }
 

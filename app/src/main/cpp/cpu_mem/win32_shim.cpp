@@ -2439,6 +2439,10 @@ extern "C" void mobiro_traced_import_wrapper(x64emu_t* emu, uintptr_t slot_ptr) 
                 } else if ((std::strstr(nm, "LoadLibraryW") || std::strstr(nm, "LoadLibraryExW") ||
                             std::strstr(nm, "GetModuleHandleW") || std::strstr(nm, "CreateFileW")) && rcx > 0xFFFF) {
                     extra = std::string(" ws=\"") + wide_preview(rcx) + "\"";
+                } else if (std::strstr(nm, "MessageBoxA") && rdx > 0xFFFF) {
+                    extra = std::string(" msg=\"") + ascii_preview(rdx) + "\"";
+                } else if ((std::strstr(nm, "OpenEventA") || std::strstr(nm, "OpenFileMappingA")) && r8 > 0xFFFF) {
+                    extra = std::string(" name=\"") + ascii_preview(r8) + "\"";
                 }
                 std::fprintf(fp, "[#%llu] ret=0x%llx %s(rcx=0x%llx, rdx=0x%llx, r8=0x%llx, r9=0x%llx)%s -> 0x%llx\n",
                              static_cast<unsigned long long>(seq),
