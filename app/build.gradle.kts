@@ -30,6 +30,18 @@ android {
         }
     }
 
+    signingConfigs {
+        getByName("debug") {
+            val ks = System.getenv("MOBIRO_DEBUG_KEYSTORE")
+            if (!ks.isNullOrBlank() && file(ks).exists()) {
+                storeFile = file(ks)
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false

@@ -1,6 +1,7 @@
 // Pure C11 shim insulating Mobiro's C++20 runtime from upstream Box64 internal C headers.
 #include "box64context.h"
 #include "box64cpu.h"
+#include "custommem.h"
 #include "debug.h"
 #include "env.h"
 #include "hostext.h"
@@ -62,6 +63,9 @@ static void mobiro_init_box64_context_once(void) {
         DetectHostCpuFeatures();
 #endif
         my_context = NewBox64Context(0);
+        if (my_context) {
+            loadProtectionFromMap();
+        }
         fprintf(ftrace, "[mobiro] Box64 context ready (pagesize=%zu, dynarec=%d, ctx=%p, exit_bridge=0x%" PRIxPTR ")\n",
                 (size_t)box64_pagesize, BOX64ENV(dynarec), (void*)my_context,
                 my_context ? my_context->exit_bridge : (uintptr_t)0);
@@ -88,6 +92,8 @@ int mobiro_box64_call_fn(uintptr_t fn_va,
     const uintptr_t stack_low = stack_base - (uintptr_t)stack_size;
     x64emu_t* emu = NewX64Emu(my_context, fn_va, stack_low, (int)stack_size, 0);
     if (!emu) return 0;
+    SetupX64Emu(emu, NULL);
+    ResetFlags(emu);
 
     uint64_t rsp = ((uint64_t)stack_base - 0x100ULL) & ~0xFULL;
     rsp -= 8;
@@ -103,9 +109,12 @@ int mobiro_box64_call_fn(uintptr_t fn_va,
     emu->ip.q[0] = (uint64_t)fn_va;
     emu->segs_offs[_GS] = teb_va;
 
+    x64emu_t* prev_emu = thread_get_emu_no_create();
+    thread_set_emu(emu);
+    const uint32_t fn_prot = getProtection(fn_va);
     if (ftrace) {
-        fprintf(ftrace, "[mobiro] call_fn enter fn=0x%" PRIxPTR " rcx=0x%" PRIx64 " rdx=0x%" PRIx64 " rsp=0x%" PRIx64 " teb=0x%" PRIxPTR "\n",
-                fn_va, rcx, rdx, rsp, teb_va);
+        fprintf(ftrace, "[mobiro] call_fn enter fn=0x%" PRIxPTR " (prot=0x%x) rcx=0x%" PRIx64 " rdx=0x%" PRIx64 " rsp=0x%" PRIx64 " teb=0x%" PRIxPTR "\n",
+                fn_va, fn_prot, rcx, rdx, rsp, teb_va);
     }
 #ifdef DYNAREC
     DynaRun(emu);
@@ -118,6 +127,11 @@ int mobiro_box64_call_fn(uintptr_t fn_va,
     }
 
     if (out_rax) *out_rax = emu->regs[_AX].q[0];
+    if (prev_emu) {
+        thread_set_emu(prev_emu);
+    } else {
+        thread_forget_emu();
+    }
     FreeX64Emu(&emu);
     return 1;
 }

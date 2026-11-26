@@ -85,8 +85,18 @@ jobs:
         if: ${{ inputs.assemble_bundled_apk }}
         uses: actions/cache@v4
         with:
-          path: ~/.android/debug.keystore
-          key: mobiro-debug-keystore-v1
+          path: ${{ github.workspace }}/.mobiro-debug-keystore
+          key: mobiro-debug-keystore-v2
+
+      - name: Ensure Stable Debug Keystore Exists
+        if: ${{ inputs.assemble_bundled_apk }}
+        run: |
+          mkdir -p "${{ github.workspace }}/.mobiro-debug-keystore"
+          KS="${{ github.workspace }}/.mobiro-debug-keystore/debug.keystore"
+          if [ ! -f "$KS" ]; then
+            keytool -genkeypair -keystore "$KS" -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          fi
+          echo "MOBIRO_DEBUG_KEYSTORE=$KS" >> "$GITHUB_ENV"
 
       - name: Assemble Bundled Debug APK (arm64-v8a)
         if: ${{ inputs.assemble_bundled_apk }}
