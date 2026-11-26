@@ -128,6 +128,23 @@ INTERFACES = [
         "ClearState": (110, 1, True),
         "Flush": (111, 1, True),
     }),
+    ("DXGIOutput", 19, {
+        "QueryInterface": (0, 3, False),
+        "AddRef": (1, 1, False),
+        "Release": (2, 1, False),
+        "GetDesc": (7, 2, False),
+        "GetDisplayModeList": (8, 5, False),
+        "FindClosestMatchingMode": (9, 4, False),
+        "WaitForVBlank": (10, 1, False),
+    }),
+    ("D3D11ResourceChild", 14, {
+        "QueryInterface": (0, 3, False),
+        "AddRef": (1, 1, False),
+        "Release": (2, 1, False),
+        "GetDevice": (3, 2, True),
+        "GetType": (7, 2, True),
+        "GetDesc": (10, 2, True),
+    }),
 ]
 
 

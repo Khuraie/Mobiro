@@ -14,7 +14,9 @@ enum class ComIfaceId : uint32_t {
     DXGISwapChain = 3,
     D3D11Device = 4,
     D3D11DeviceContext = 5,
-    Count = 6
+    DXGIOutput = 6,
+    D3D11ResourceChild = 7,
+    Count = 8
 };
 
 struct ComMethodMeta {
@@ -259,6 +261,40 @@ inline constexpr uint32_t kFlush = 111;
 inline constexpr ComMethodMeta kMeta_Flush = {111, 1, true};
 } // namespace D3D11DeviceContextSlots
 
+namespace DXGIOutputSlots {
+inline constexpr size_t kSlotCount = 19;
+inline constexpr uint32_t kQueryInterface = 0;
+inline constexpr ComMethodMeta kMeta_QueryInterface = {0, 3, false};
+inline constexpr uint32_t kAddRef = 1;
+inline constexpr ComMethodMeta kMeta_AddRef = {1, 1, false};
+inline constexpr uint32_t kRelease = 2;
+inline constexpr ComMethodMeta kMeta_Release = {2, 1, false};
+inline constexpr uint32_t kGetDesc = 7;
+inline constexpr ComMethodMeta kMeta_GetDesc = {7, 2, false};
+inline constexpr uint32_t kGetDisplayModeList = 8;
+inline constexpr ComMethodMeta kMeta_GetDisplayModeList = {8, 5, false};
+inline constexpr uint32_t kFindClosestMatchingMode = 9;
+inline constexpr ComMethodMeta kMeta_FindClosestMatchingMode = {9, 4, false};
+inline constexpr uint32_t kWaitForVBlank = 10;
+inline constexpr ComMethodMeta kMeta_WaitForVBlank = {10, 1, false};
+} // namespace DXGIOutputSlots
+
+namespace D3D11ResourceChildSlots {
+inline constexpr size_t kSlotCount = 14;
+inline constexpr uint32_t kQueryInterface = 0;
+inline constexpr ComMethodMeta kMeta_QueryInterface = {0, 3, false};
+inline constexpr uint32_t kAddRef = 1;
+inline constexpr ComMethodMeta kMeta_AddRef = {1, 1, false};
+inline constexpr uint32_t kRelease = 2;
+inline constexpr ComMethodMeta kMeta_Release = {2, 1, false};
+inline constexpr uint32_t kGetDevice = 3;
+inline constexpr ComMethodMeta kMeta_GetDevice = {3, 2, true};
+inline constexpr uint32_t kGetType = 7;
+inline constexpr ComMethodMeta kMeta_GetType = {7, 2, true};
+inline constexpr uint32_t kGetDesc = 10;
+inline constexpr ComMethodMeta kMeta_GetDesc = {10, 2, true};
+} // namespace D3D11ResourceChildSlots
+
 inline constexpr size_t slot_count_for(ComIfaceId id) {
     switch (id) {
         case ComIfaceId::Unknown: return 3;
@@ -267,6 +303,8 @@ inline constexpr size_t slot_count_for(ComIfaceId id) {
         case ComIfaceId::DXGISwapChain: return 18;
         case ComIfaceId::D3D11Device: return 43;
         case ComIfaceId::D3D11DeviceContext: return 115;
+        case ComIfaceId::DXGIOutput: return 19;
+        case ComIfaceId::D3D11ResourceChild: return 14;
         default: return 3;
     }
 }

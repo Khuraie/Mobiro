@@ -1563,6 +1563,174 @@ void test_m12_dep_dll_unresolved_trap_and_create_thread_exec() {
     fs::remove_all(tmp);
 }
 
+void test_m13_com_out_param_wrapping_and_array_unwrapping() {
+    auto& com = mobiro::gfx::D3D11ComBridge::global();
+    com.clear();
+
+    // 1. Fake native DXGI/D3D11 objects verifying automatic COM out-param wrapping + pointer-array unwrapping
+    struct FakeChild { const void* const* vtbl; uint32_t id; uint32_t refs; };
+    struct FakeContext {
+        const void* const* vtbl;
+        void* bound_rtvs[2];
+        void* bound_dsv;
+        void* bound_vbs[2];
+        uint32_t refs;
+    };
+    struct FakeDevice {
+        const void* const* vtbl;
+        FakeChild* child_to_return;
+        FakeContext* ctx_to_return;
+        uint32_t refs;
+    };
+    struct FakeFactory {
+        const void* const* vtbl;
+        FakeChild* adapter_to_return;
+        uint32_t refs;
+    };
+
+    static void* child_vtbl[mobiro::gfx::d3d11_abi::D3D11ResourceChildSlots::kSlotCount]{};
+    child_vtbl[2] = reinterpret_cast<void*>(+[](void* s) -> uint64_t { return --static_cast<FakeChild*>(s)->refs; });
+
+    static void* ctx_vtbl[mobiro::gfx::d3d11_abi::D3D11DeviceContextSlots::kSlotCount]{};
+    ctx_vtbl[2] = reinterpret_cast<void*>(+[](void* s) -> uint64_t { return --static_cast<FakeContext*>(s)->refs; });
+    ctx_vtbl[mobiro::gfx::d3d11_abi::D3D11DeviceContextSlots::kOMSetRenderTargets] =
+        reinterpret_cast<void*>(+[](void* s, uint64_t num, uint64_t rtvs_ptr, uint64_t dsv_ptr) -> uint64_t {
+            auto* c = static_cast<FakeContext*>(s);
+            auto** arr = reinterpret_cast<void**>(rtvs_ptr);
+            if (num >= 2 && arr) { c->bound_rtvs[0] = arr[0]; c->bound_rtvs[1] = arr[1]; }
+            c->bound_dsv = reinterpret_cast<void*>(dsv_ptr);
+            return 0;
+        });
+    ctx_vtbl[mobiro::gfx::d3d11_abi::D3D11DeviceContextSlots::kIASetVertexBuffers] =
+        reinterpret_cast<void*>(+[](void* s, uint64_t /*start*/, uint64_t num, uint64_t vbs_ptr) -> uint64_t {
+            auto* c = static_cast<FakeContext*>(s);
+            auto** arr = reinterpret_cast<void**>(vbs_ptr);
+            if (num >= 2 && arr) { c->bound_vbs[0] = arr[0]; c->bound_vbs[1] = arr[1]; }
+            return 0;
+        });
+
+    static void* dev_vtbl[mobiro::gfx::d3d11_abi::D3D11DeviceSlots::kSlotCount]{};
+    dev_vtbl[2] = reinterpret_cast<void*>(+[](void* s) -> uint64_t { return --static_cast<FakeDevice*>(s)->refs; });
+    dev_vtbl[mobiro::gfx::d3d11_abi::D3D11DeviceSlots::kCreateBuffer] =
+        reinterpret_cast<void*>(+[](void* s, uint64_t, uint64_t, uint64_t out_pp) -> uint64_t {
+            *reinterpret_cast<void**>(out_pp) = static_cast<FakeDevice*>(s)->child_to_return;
+            return 0; // S_OK
+        });
+    dev_vtbl[mobiro::gfx::d3d11_abi::D3D11DeviceSlots::kGetImmediateContext] =
+        reinterpret_cast<void*>(+[](void* s, uint64_t out_pp) -> uint64_t {
+            *reinterpret_cast<void**>(out_pp) = static_cast<FakeDevice*>(s)->ctx_to_return;
+            return 0;
+        });
+
+    static void* fac_vtbl[mobiro::gfx::d3d11_abi::DXGIFactory1Slots::kSlotCount]{};
+    fac_vtbl[mobiro::gfx::d3d11_abi::DXGIFactory1Slots::kEnumAdapters1] =
+        reinterpret_cast<void*>(+[](void* s, uint64_t /*idx*/, uint64_t out_pp) -> uint64_t {
+            *reinterpret_cast<void**>(out_pp) = static_cast<FakeFactory*>(s)->adapter_to_return;
+            return 0; // S_OK
+        });
+
+    FakeChild nat_adapter{child_vtbl, 10, 1};
+    FakeChild nat_rtv0{child_vtbl, 1, 1}, nat_rtv1{child_vtbl, 2, 1}, nat_dsv{child_vtbl, 3, 1};
+    FakeChild nat_vb0{child_vtbl, 4, 1}, nat_vb1{child_vtbl, 5, 1};
+    FakeContext nat_ctx{ctx_vtbl, {nullptr, nullptr}, nullptr, {nullptr, nullptr}, 1};
+    FakeDevice nat_dev{dev_vtbl, &nat_vb0, &nat_ctx, 1};
+    FakeFactory nat_fac{fac_vtbl, &nat_adapter, 1};
+
+    auto invoke_slot = [](mobiro::gfx::ComProxyObject* pr, size_t slot, x64emu_t& e) {
+        e.rcx = reinterpret_cast<uint64_t>(pr);
+        const auto* st = reinterpret_cast<const mobiro::cpu::NativeBridgeStub*>(pr->lpVtbl[slot]);
+        reinterpret_cast<void(*)(x64emu_t*, uintptr_t)>(st->wrapper_ptr)(&e, static_cast<uintptr_t>(st->thunk_ptr));
+    };
+
+    // EnumAdapters1 -> auto-wraps returned adapter into DXGIAdapter1 proxy
+    auto* fac_p = com.wrap(&nat_fac, mobiro::gfx::d3d11_abi::ComIfaceId::DXGIFactory1);
+    void* out_adapter = nullptr;
+    x64emu_t emu{};
+    emu.rdx = 0; emu.r8 = reinterpret_cast<uint64_t>(&out_adapter);
+    invoke_slot(fac_p, mobiro::gfx::d3d11_abi::DXGIFactory1Slots::kEnumAdapters1, emu);
+    assert(emu.rax == 0 && out_adapter != nullptr);
+    auto* adapter_p = com.find_proxy(reinterpret_cast<uintptr_t>(out_adapter));
+    assert(adapter_p != nullptr && adapter_p->native_obj == &nat_adapter &&
+           adapter_p->iface == mobiro::gfx::d3d11_abi::ComIfaceId::DXGIAdapter1);
+
+    // CreateBuffer + GetImmediateContext -> auto-wraps both child buffer and context
+    auto* dev_p = com.wrap(&nat_dev, mobiro::gfx::d3d11_abi::ComIfaceId::D3D11Device);
+    void* out_vb0 = nullptr;
+    emu = {}; emu.r9 = reinterpret_cast<uint64_t>(&out_vb0);
+    invoke_slot(dev_p, mobiro::gfx::d3d11_abi::D3D11DeviceSlots::kCreateBuffer, emu);
+    assert(emu.rax == 0 && com.find_proxy(reinterpret_cast<uintptr_t>(out_vb0))->native_obj == &nat_vb0);
+
+    void* out_ctx = nullptr;
+    emu = {}; emu.rdx = reinterpret_cast<uint64_t>(&out_ctx);
+    invoke_slot(dev_p, mobiro::gfx::d3d11_abi::D3D11DeviceSlots::kGetImmediateContext, emu);
+    auto* ctx_p = com.find_proxy(reinterpret_cast<uintptr_t>(out_ctx));
+    assert(ctx_p != nullptr && ctx_p->native_obj == &nat_ctx &&
+           ctx_p->iface == mobiro::gfx::d3d11_abi::ComIfaceId::D3D11DeviceContext);
+
+    // OMSetRenderTargets + IASetVertexBuffers -> unwraps arrays of guest ComProxyObjects into native pointers
+    auto* rtv0_p = com.wrap(&nat_rtv0, mobiro::gfx::d3d11_abi::ComIfaceId::D3D11ResourceChild);
+    auto* rtv1_p = com.wrap(&nat_rtv1, mobiro::gfx::d3d11_abi::ComIfaceId::D3D11ResourceChild);
+    auto* dsv_p  = com.wrap(&nat_dsv,  mobiro::gfx::d3d11_abi::ComIfaceId::D3D11ResourceChild);
+    auto* vb1_p  = com.wrap(&nat_vb1,  mobiro::gfx::d3d11_abi::ComIfaceId::D3D11ResourceChild);
+
+    void* guest_rtvs[2] = {rtv0_p, rtv1_p};
+    emu = {}; emu.rdx = 2; emu.r8 = reinterpret_cast<uint64_t>(guest_rtvs); emu.r9 = reinterpret_cast<uint64_t>(dsv_p);
+    invoke_slot(ctx_p, mobiro::gfx::d3d11_abi::D3D11DeviceContextSlots::kOMSetRenderTargets, emu);
+    assert(nat_ctx.bound_rtvs[0] == &nat_rtv0 && nat_ctx.bound_rtvs[1] == &nat_rtv1 && nat_ctx.bound_dsv == &nat_dsv);
+
+    void* guest_vbs[2] = {out_vb0, vb1_p};
+    emu = {}; emu.rdx = 0; emu.r8 = 2; emu.r9 = reinterpret_cast<uint64_t>(guest_vbs);
+    invoke_slot(ctx_p, mobiro::gfx::d3d11_abi::D3D11DeviceContextSlots::kIASetVertexBuffers, emu);
+    assert(nat_ctx.bound_vbs[0] == &nat_vb0 && nat_ctx.bound_vbs[1] == &nat_vb1);
+    com.clear();
+
+    // 2. M13 Win32 shims: CreateMutex/ReleaseMutex, GetMonitorInfoW, EnumDisplaySettingsW, FindFirstFileW
+    const fs::path tmp = fs::temp_directory_path() / "mobiro_test_m13";
+    fs::remove_all(tmp);
+    fs::create_directories(tmp);
+    {
+        std::ofstream f(tmp / "Data0.bdt", std::ios::binary);
+        f << "BDF4DATA";
+    }
+    mobiro::validator::VfsMapper vfs;
+    assert(vfs.index_root(tmp.string()));
+    mobiro::mem::GuestArena arena;
+    assert(arena.reserve(0x0000000100000000ULL, 128ULL * 1024 * 1024));
+    mobiro::cpu::Box64Bridge bridge;
+    assert(bridge.initialize(&arena, &vfs));
+    bridge.window().set_dimensions(2400, 1080);
+
+    emu = {}; emu.rdx = 1; // bInitialOwner = TRUE
+    assert(bridge.invoke_thunk("kernel32.dll", "CreateMutexW", &emu) && emu.rax != 0);
+    const uint64_t hmtx = emu.rax;
+    emu = {}; emu.rcx = hmtx;
+    assert(bridge.invoke_thunk("kernel32.dll", "ReleaseMutex", &emu) && emu.rax == 1);
+    emu = {}; emu.rcx = hmtx; emu.rdx = 100;
+    assert(bridge.invoke_thunk("kernel32.dll", "WaitForSingleObject", &emu) && emu.rax == 0);
+
+    uint8_t mi[104]{};
+    uint32_t mi_cb = 104;
+    std::memcpy(mi, &mi_cb, 4);
+    emu = {}; emu.rcx = 1; emu.rdx = reinterpret_cast<uint64_t>(mi);
+    assert(bridge.invoke_thunk("user32.dll", "GetMonitorInfoW", &emu) && emu.rax == 1);
+    int32_t mon_w = 0, mon_h = 0;
+    std::memcpy(&mon_w, mi + 12, 4);
+    std::memcpy(&mon_h, mi + 16, 4);
+    assert(mon_w == 2400 && mon_h == 1080);
+
+    uint8_t find_data[592]{};
+    const uint16_t q_w[] = {'D','a','t','a','0','.','b','d','t', 0};
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>(q_w); emu.rdx = reinterpret_cast<uint64_t>(find_data);
+    assert(bridge.invoke_thunk("kernel32.dll", "FindFirstFileW", &emu) &&
+           emu.rax != mobiro::win32::FileHandleTable::kInvalidHandle);
+    uint32_t sz_lo = 0;
+    std::memcpy(&sz_lo, find_data + 32, 4);
+    assert(sz_lo == 8);
+
+    bridge.shutdown();
+    fs::remove_all(tmp);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1590,6 +1758,7 @@ int main(int argc, char** argv) {
     test_m10_xmm_com_auto_wrap_and_dllmain_tls();
     test_m11_box64_onebridge_condvar_sem_and_crt();
     test_m12_dep_dll_unresolved_trap_and_create_thread_exec();
+    test_m13_com_out_param_wrapping_and_array_unwrapping();
     std::cout << "All Mobiro core unit tests passed.\n";
     return 0;
 }

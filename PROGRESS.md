@@ -6,6 +6,16 @@
 
 ## Log Entries
 
+### Increment 15 — M13: Full D3D11/DXGI COM Out-Param Auto-Wrapping, Zero-Heap Pointer-Array Unwrapping & Display/Mutex/Find Shims (2026-11-27)
+- **Status:** Implemented & verified (local MSVC 2022 + GitHub Actions Linux GCC/`spirv-val` + Android ARM64 NDK)
+- **Changes:**
+  - Expanded `scripts/gen_d3d11_thunks.py` → `app/src/main/cpp/gfx/d3d11_com_thunks_gen.hpp` to 8 DXGI/D3D11 COM interfaces (237 vtable slots), adding `DXGIOutput` (19 slots) and `D3D11ResourceChild` (14 slots).
+  - Upgraded `D3D11ComBridge` (`app/src/main/cpp/gfx/d3d11_com_bridge.hpp`) with automatic Win64 `ComProxyObject` out-parameter wrapping across `IUnknown::QueryInterface` (with DXGI/D3D11 IID classification), `IDXGIFactory1::{EnumAdapters, EnumAdapters1, CreateSwapChain}`, `IDXGIAdapter1::EnumOutputs`, `IDXGISwapChain::GetBuffer`, `ID3D11Device::{CreateBuffer..CreateQuery, CreateDeferredContext, GetImmediateContext}`, and `GetDevice`, plus zero-heap stack pointer-array unwrapping for `OMSetRenderTargets*`, `IASetVertexBuffers`, and all `VS/PS/GS/CS` `SetConstantBuffers`/`SetShaderResources`/`SetSamplers` slots.
+  - Added Win32 mutex (`CreateMutexW/A`, `ReleaseMutex`, `DuplicateHandle`), display/monitor (`MonitorFromWindow`, `GetMonitorInfoW`, `EnumDisplaySettingsW`), `FindFirstFileW`/`FindNextFileW`/`FindClose`, `SetThreadDescription`, `SetProcessDPIAware`, and `GetKeyState`/`GetAsyncKeyState` thunks in `win32_shim.cpp`.
+  - Added `test_m13_com_out_param_wrapping_and_array_unwrapping` in `tests/test_core.cpp` (14/14 test suites passing).
+
+---
+
 ### Increment 14 — M12: Dependent BYOF DLL Auto-Load, Safe Unresolved-Import Traps, Default `CreateThread` Execution & Android Diagnostics (2026-11-27)
 - **Status:** Implemented & verified (local MSVC 2022 + GitHub Actions Linux GCC/`spirv-val` + Android ARM64 NDK)
 - **Changes:**
@@ -168,4 +178,4 @@
 ---
 
 ## Upcoming Increments
-- **Increment 15 (M13 — Live Adreno 7xx/8xx Boot Triage & In-Swapchain HUD Hook):** Rebuild the bundled APK via `build-third-party.yml`, test first real-device Adreno 7xx/8xx launch against user-supplied BYOF `Sekiro.exe`, close any newly reported `unresolved IAT` calls from `logcat`, and attach `TouchOverlayVk` into DXVK's live Vulkan present pass.
+- **Increment 16 (M14 — Live Adreno 7xx/8xx Handset Bring-Up & In-Swapchain HUD Hook):** Rebuild the bundled APK via `build-third-party.yml`, test first real-device Adreno 7xx/8xx launch against user-supplied BYOF `Sekiro.exe`, close any newly reported `unresolved IAT` calls from `logcat`, and bind `TouchOverlayVk` into DXVK's live Vulkan present pass.

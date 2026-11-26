@@ -1021,6 +1021,96 @@ void thunk_GetTempPathW(x64emu_t* emu) {
     reg_rax(emu) = kLen;
 }
 
+// --- M13: Mutexes, Display/Monitor Info, Locale & FindFirstFileW ---
+
+void thunk_CreateMutex(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    if (!b) { reg_rax(emu) = 0; return; }
+    // Model non-recursive Win32 mutex cleanly as a binary semaphore (initial = !bInitialOwner)
+    const bool initial_owner = (reg_rdx(emu) != 0);
+    reg_rax(emu) = b->events().create_semaphore(initial_owner ? 0 : 1, 1);
+}
+
+void thunk_ReleaseMutex(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    reg_rax(emu) = (b && b->events().release_semaphore(reg_rcx(emu), 1, nullptr)) ? 1ULL : 0ULL;
+}
+
+void thunk_DuplicateHandle(x64emu_t* emu) {
+    auto* out_h = reinterpret_cast<uint64_t*>(reg_r9(emu));
+    if (!out_h) { reg_rax(emu) = 0; return; }
+    *out_h = reg_rdx(emu); // Share same table handle id
+    reg_rax(emu) = 1ULL;
+}
+
+void thunk_MonitorFromWindow(x64emu_t* emu) { reg_rax(emu) = 1ULL; } // Primary HMONITOR
+
+void thunk_GetMonitorInfoW(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    auto* out = reinterpret_cast<uint8_t*>(reg_rdx(emu));
+    if (!b || !out) { reg_rax(emu) = 0; return; }
+    uint32_t cb = 0;
+    std::memcpy(&cb, out, 4);
+    if (cb < 40) { reg_rax(emu) = 0; return; }
+    const auto r = b->window().client_rect();
+    std::memcpy(out + 4, &r, sizeof(r));   // rcMonitor
+    std::memcpy(out + 20, &r, sizeof(r));  // rcWork
+    const uint32_t flags = 1u;             // MONITORINFOF_PRIMARY
+    std::memcpy(out + 36, &flags, 4);
+    if (cb >= 104) {
+        static const uint16_t kDisp[] = {'\\','\\','.','\\','D','I','S','P','L','A','Y','1', 0};
+        std::memcpy(out + 40, kDisp, sizeof(kDisp));
+    }
+    reg_rax(emu) = 1ULL;
+}
+
+void thunk_EnumDisplaySettingsW(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    auto* dm = reinterpret_cast<uint8_t*>(reg_r8(emu));
+    if (!b || !dm) { reg_rax(emu) = 0; return; }
+    const auto r = b->window().client_rect();
+    const uint32_t bpp = 32, w = static_cast<uint32_t>(r.right), h = static_cast<uint32_t>(r.bottom), hz = 60;
+    // DEVMODEW offsets: dmBitsPerPel=168, dmPelsWidth=172, dmPelsHeight=176, dmDisplayFrequency=184
+    std::memcpy(dm + 168, &bpp, 4);
+    std::memcpy(dm + 172, &w, 4);
+    std::memcpy(dm + 176, &h, 4);
+    std::memcpy(dm + 184, &hz, 4);
+    reg_rax(emu) = 1ULL;
+}
+
+void thunk_FindFirstFileW(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    const std::string pattern = win32::utf16le_to_utf8(reinterpret_cast<const uint16_t*>(reg_rcx(emu)));
+    auto* out = reinterpret_cast<uint8_t*>(reg_rdx(emu));
+    std::string host;
+    if (!b || !b->vfs() || !out || !b->vfs()->resolve(pattern, host)) {
+        if (auto* teb = current_teb(emu)) teb->last_error = 2u; // ERROR_FILE_NOT_FOUND
+        reg_rax(emu) = win32::FileHandleTable::kInvalidHandle;
+        return;
+    }
+    std::memset(out, 0, 592); // sizeof(WIN32_FIND_DATAW)
+    std::error_code ec;
+    const uint32_t attrs = std::filesystem::is_directory(host, ec) ? 0x10u : 0x80u;
+    std::memcpy(out, &attrs, 4);
+    const uint64_t fsz = std::filesystem::is_regular_file(host, ec)
+        ? static_cast<uint64_t>(std::filesystem::file_size(host, ec)) : 0ULL;
+    const uint32_t sz_hi = static_cast<uint32_t>(fsz >> 32);
+    const uint32_t sz_lo = static_cast<uint32_t>(fsz & 0xFFFFFFFFu);
+    std::memcpy(out + 28, &sz_hi, 4);
+    std::memcpy(out + 32, &sz_lo, 4);
+    const std::string fname = std::filesystem::path(host).filename().string();
+    auto* cfile = reinterpret_cast<uint16_t*>(out + 44);
+    const size_t n = std::min<size_t>(fname.size(), 259);
+    for (size_t i = 0; i < n; ++i) cfile[i] = static_cast<uint8_t>(fname[i]);
+    cfile[n] = 0;
+    reg_rax(emu) = 0x00090001ULL; // Synthetic single-entry find handle
+}
+
+void thunk_FindNextFileW(x64emu_t* emu) {
+    if (auto* teb = current_teb(emu)) teb->last_error = 18u; // ERROR_NO_MORE_FILES
+    reg_rax(emu) = 0ULL;
+}
+
 // --- Input ---
 
 void thunk_XInputGetState(x64emu_t* emu) {
@@ -1460,6 +1550,22 @@ void Box64Bridge::register_default_win32_thunks() {
     register_thunk("kernel32.dll", "TerminateProcess", &thunk_ReturnTrue);
     register_thunk("ws2_32.dll", "WSAStartup", &thunk_ReturnZero);
     register_thunk("ws2_32.dll", "WSACleanup", &thunk_ReturnZero);
+
+    // M13: Mutexes, Display/Monitor Info, FindFirstFileW & DPI/Thread helpers
+    register_thunk("kernel32.dll", "CreateMutexW", &thunk_CreateMutex);
+    register_thunk("kernel32.dll", "CreateMutexA", &thunk_CreateMutex);
+    register_thunk("kernel32.dll", "ReleaseMutex", &thunk_ReleaseMutex);
+    register_thunk("kernel32.dll", "DuplicateHandle", &thunk_DuplicateHandle);
+    register_thunk("kernel32.dll", "SetThreadDescription", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "FindFirstFileW", &thunk_FindFirstFileW);
+    register_thunk("kernel32.dll", "FindNextFileW", &thunk_FindNextFileW);
+    register_thunk("kernel32.dll", "FindClose", &thunk_ReturnTrue);
+    register_thunk("user32.dll", "MonitorFromWindow", &thunk_MonitorFromWindow);
+    register_thunk("user32.dll", "GetMonitorInfoW", &thunk_GetMonitorInfoW);
+    register_thunk("user32.dll", "EnumDisplaySettingsW", &thunk_EnumDisplaySettingsW);
+    register_thunk("user32.dll", "SetProcessDPIAware", &thunk_ReturnTrue);
+    register_thunk("user32.dll", "GetKeyState", &thunk_ReturnZero);
+    register_thunk("user32.dll", "GetAsyncKeyState", &thunk_ReturnZero);
 }
 
 } // namespace mobiro::cpu
