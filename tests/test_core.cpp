@@ -1,5 +1,6 @@
 #undef NDEBUG
 #include "audio/aaudio_xaudio_bridge.hpp"
+#include "audio/winmm_waveout_bridge.hpp"
 #include "audio/xaudio2_com.hpp"
 #include "audio/xaudio2_com_bridge.hpp"
 #include "cpu_mem/box64_bridge.hpp"
@@ -164,10 +165,16 @@ void test_byof_validator_and_vfs() {
     assert(vfs.resolve("C:\\DATA3.BDT", host_path));
     assert(vfs.resolve("SEKIRO.EXE", host_path));
 
-    // Corrupt BDF4 magic should fail cleanly
+    // Retail PC Sekiro ships Data1..Data5 without Data0: removing Data0 must still validate
+    fs::remove(tmp / "Data0.bhd");
+    fs::remove(tmp / "Data0.bdt");
+    auto retail_rep = mobiro::validator::validate_byof_directory(tmp.string(), vfs);
+    assert(retail_rep.ok && retail_rep.verified_archive_pairs == 5);
+
+    // Truncated/corrupt archive should fail cleanly
     {
         std::ofstream bad_bdt(tmp / "Data2.bdt", std::ios::binary | std::ios::trunc);
-        bad_bdt.write("XXXX000000000000", 16);
+        bad_bdt.write("BAD", 3);
     }
     auto bad_rep = mobiro::validator::validate_byof_directory(tmp.string(), vfs);
     assert(!bad_rep.ok);
@@ -1208,9 +1215,17 @@ void test_d3d11_com_bridge_ext_win32_and_hud_draw() {
     void* di8_raw = nullptr;
     emu = {}; emu.r9 = reinterpret_cast<uint64_t>(&di8_raw);
     assert(bridge.invoke_thunk("dinput8.dll", "DirectInput8Create", &emu) && emu.rax == 0 && di8_raw != nullptr);
-    auto* di8 = static_cast<mobiro::win32::IDirectInput8Com*>(di8_raw);
-    assert(di8->lpVtbl->EnumDevices(di8, 0, nullptr, nullptr, 0) == 0);
-    assert(di8->lpVtbl->Release(di8) == 0);
+    // Invoke IDirectInput8::EnumDevices (slot 4) & Release (slot 2) through Box64 onebridge_t stubs
+    const auto* di8_vtbl = *reinterpret_cast<const uintptr_t* const*>(di8_raw);
+    const auto* enum_stub = reinterpret_cast<const mobiro::cpu::NativeBridgeStub*>(di8_vtbl[4]);
+    const auto* rel_di_stub = reinterpret_cast<const mobiro::cpu::NativeBridgeStub*>(di8_vtbl[2]);
+    assert(enum_stub->trap_cc == 0xCC && enum_stub->magic[0] == 'S' && enum_stub->magic[1] == 'C');
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>(di8_raw);
+    reinterpret_cast<void(*)(x64emu_t*, uintptr_t)>(enum_stub->wrapper_ptr)(&emu, static_cast<uintptr_t>(enum_stub->thunk_ptr));
+    assert(emu.rax == 0);
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>(di8_raw);
+    reinterpret_cast<void(*)(x64emu_t*, uintptr_t)>(rel_di_stub->wrapper_ptr)(&emu, static_cast<uintptr_t>(rel_di_stub->thunk_ptr));
+    assert(emu.rax == 0);
 
     bridge.shutdown();
 }
@@ -2145,6 +2160,87 @@ void test_m17_xaudio2_onebridge_ring_and_gourd_touch() {
     bridge.shutdown();
 }
 
+void test_m18_winmm_waveout_xinput_ordinals_and_sekiro_compat() {
+    auto& aaudio = mobiro::audio::AAudioXAudioBridge::global();
+    aaudio.stop();
+
+    mobiro::mem::GuestArena arena;
+    assert(arena.reserve(0x0000000100000000ULL, 128ULL * 1024 * 1024));
+    mobiro::validator::VfsMapper vfs;
+    mobiro::cpu::Box64Bridge bridge;
+    assert(bridge.initialize(&arena, &vfs));
+
+    // 1. xinput1_3.dll ordinals #2 (XInputGetState) and #3 (XInputSetState) + dxgi!CreateDXGIFactory
+    mobiro::input::InputRouter::global().set_button(mobiro::input::kRightShoulder, true);
+    mobiro::input::XInputState xi{};
+    x64emu_t emu{};
+    emu.rcx = 0; emu.rdx = reinterpret_cast<uint64_t>(&xi);
+    assert(bridge.invoke_thunk("xinput1_3.dll", "#2", &emu) && emu.rax == 0);
+    assert((xi.Gamepad.wButtons & mobiro::input::kRightShoulder) != 0);
+    mobiro::input::InputRouter::global().set_button(mobiro::input::kRightShoulder, false);
+    emu = {}; emu.rcx = 0;
+    assert(bridge.invoke_thunk("xinput1_3.dll", "#3", &emu) && emu.rax == 0);
+    assert(bridge.resolve_import("dxgi.dll", "CreateDXGIFactory") != 0);
+
+    // 2. WinMM waveOut* -> AAudioXAudioBridge (FMODEx & Bink2 real audio path)
+    emu = {};
+    assert(bridge.invoke_thunk("winmm.dll", "waveOutGetNumDevs", &emu) && emu.rax == 1);
+
+    uint64_t hwo = 0;
+    mobiro::audio::WaveFormatEx wfmt{};
+    wfmt.format_tag = 1; wfmt.channels = 2; wfmt.samples_per_sec = 48000;
+    wfmt.bits_per_sample = 16; wfmt.block_align = 4; wfmt.avg_bytes_per_sec = 192000;
+    const uint64_t ev = bridge.events().create_event(true, false);
+    uint64_t wo_stack[8]{};
+    wo_stack[5] = 0;                                             // dwInstance
+    wo_stack[6] = mobiro::audio::WinmmWaveOutBridge::kCallbackEvent; // fdwOpen
+    emu = {};
+    emu.rcx = reinterpret_cast<uint64_t>(&hwo);
+    emu.rdx = 0xFFFFFFFFu; // WAVE_MAPPER
+    emu.r8  = reinterpret_cast<uint64_t>(&wfmt);
+    emu.r9  = ev;
+    emu.rsp = reinterpret_cast<uint64_t>(wo_stack);
+    assert(bridge.invoke_thunk("winmm.dll", "waveOutOpen", &emu) && emu.rax == 0 && hwo != 0);
+
+    int16_t pcm[4] = {16384, -16384, 32767, -32768};
+    mobiro::audio::Win64WaveHdr hdr{};
+    hdr.lpData = reinterpret_cast<uint8_t*>(pcm);
+    hdr.dwBufferLength = sizeof(pcm);
+    emu = {}; emu.rcx = hwo; emu.rdx = reinterpret_cast<uint64_t>(&hdr); emu.r8 = sizeof(hdr);
+    assert(bridge.invoke_thunk("winmm.dll", "waveOutPrepareHeader", &emu) && emu.rax == 0);
+    assert((hdr.dwFlags & mobiro::audio::WinmmWaveOutBridge::kWhdrPrepared) != 0);
+
+    emu = {}; emu.rcx = hwo; emu.rdx = reinterpret_cast<uint64_t>(&hdr); emu.r8 = sizeof(hdr);
+    assert(bridge.invoke_thunk("winmm.dll", "waveOutWrite", &emu) && emu.rax == 0);
+    assert((hdr.dwFlags & mobiro::audio::WinmmWaveOutBridge::kWhdrDone) != 0);
+    assert(bridge.events().wait_single(ev, 0) == mobiro::win32::EventTable::kWaitObject0);
+
+    float drained[4]{};
+    assert(aaudio.drain_pcm_float(drained, 4) == 4);
+    assert(std::abs(drained[0] - 0.5f) < 1e-3f && std::abs(drained[1] + 0.5f) < 1e-3f);
+
+    mobiro::audio::Win64MmTime mmt{};
+    mmt.wType = 4; // TIME_BYTES
+    emu = {}; emu.rcx = hwo; emu.rdx = reinterpret_cast<uint64_t>(&mmt); emu.r8 = sizeof(mmt);
+    assert(bridge.invoke_thunk("winmm.dll", "waveOutGetPosition", &emu) && emu.rax == 0 && mmt.value == 8);
+
+    emu = {}; emu.rcx = hwo;
+    assert(bridge.invoke_thunk("winmm.dll", "waveOutClose", &emu) && emu.rax == 0);
+    aaudio.stop();
+
+    // 3. Key retail Sekiro kernel32 / oleaut32 / advapi32 thunks
+    emu = {};
+    assert(bridge.invoke_thunk("kernel32.dll", "GetVersion", &emu) && (emu.rax & 0xFF) == 10);
+    const uint16_t bstr_in[] = {'W','o','l','f', 0};
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>(bstr_in);
+    assert(bridge.invoke_thunk("oleaut32.dll", "#2", &emu) && emu.rax != 0);
+    const uint64_t bstr = emu.rax;
+    emu = {}; emu.rcx = bstr;
+    assert(bridge.invoke_thunk("oleaut32.dll", "#6", &emu));
+
+    bridge.shutdown();
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -2158,6 +2254,37 @@ int main(int argc, char** argv) {
         ff.write(reinterpret_cast<const char*>(mobiro::gfx::spirv::kHudFragSpv),
                  sizeof(mobiro::gfx::spirv::kHudFragSpv));
         return 0;
+    }
+    if (argc == 3 && std::strcmp(argv[1], "--verify-byof") == 0) {
+        mobiro::validator::VfsMapper vfs;
+        auto rep = mobiro::validator::validate_byof_directory(argv[2], vfs);
+        if (!rep.ok) {
+            std::cerr << "BYOF validation failed: " << rep.error << "\n";
+            return 1;
+        }
+        mobiro::mem::GuestArena arena;
+        if (!arena.reserve(0x0000000100000000ULL, 2ULL * 1024 * 1024 * 1024)) {
+            std::cerr << "GuestArena reserve failed\n";
+            return 2;
+        }
+        mobiro::cpu::Box64Bridge bridge;
+        if (!bridge.initialize(&arena, &vfs)) {
+            std::cerr << "Box64Bridge init failed\n";
+            return 3;
+        }
+        std::string exe_host;
+        vfs.resolve("sekiro.exe", exe_host);
+        auto pe = mobiro::cpu::PeLoader::load_pe64(exe_host, arena, bridge);
+        std::cout << "BYOF OK: archives=" << rep.verified_archive_pairs
+                  << " pe_ok=" << (pe.ok ? 1 : 0)
+                  << " base=0x" << std::hex << pe.mapped_base << std::dec
+                  << " relocs=" << pe.relocations_applied
+                  << " dep_dlls=" << pe.dep_dlls.size()
+                  << " iat_resolved=" << pe.imports_resolved
+                  << " iat_unresolved=" << pe.unresolved_imports.size() << "\n";
+        for (const auto& u : pe.unresolved_imports) std::cout << "  UNRESOLVED: " << u << "\n";
+        bridge.shutdown();
+        return (pe.ok && pe.unresolved_imports.empty()) ? 0 : 4;
     }
     test_byof_validator_and_vfs();
     test_pe_loader_teb_and_win32_thunks();
@@ -2177,6 +2304,7 @@ int main(int argc, char** argv) {
     test_m15_segregated_heap_sharded_sync_and_parallel_io();
     test_m16_init_once_slist_time_query_and_xinput_caps();
     test_m17_xaudio2_onebridge_ring_and_gourd_touch();
+    test_m18_winmm_waveout_xinput_ordinals_and_sekiro_compat();
     std::cout << "All Mobiro core unit tests passed.\n";
     return 0;
 }

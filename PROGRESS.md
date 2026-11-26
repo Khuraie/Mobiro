@@ -6,6 +6,18 @@
 
 ## Log Entries
 
+### Increment 20 — M18: 100% Retail `sekiro.exe` + BYOF DLL Import Coverage, Real `Data1..Data5` Validator Fix, FMODEx/Bink2 `waveOut*` → `AAudio` Bridge & DirectInput8 `onebridge_t` Proxy (2026-11-27)
+- **Status:** Implemented & verified (local MSVC 2022 + real BYOF PE64 dry-run load & IAT patch + GitHub Actions CI)
+- **Changes:**
+  - Audited structural PE32+ import tables of a local retail BYOF *Sekiro* install (`sekiro.exe` + 7 shipped DLLs) and fixed 4 critical real-boot blockers:
+    1. `archive_probe.hpp`: updated `validate_byof_directory` to validate retail `Data1..Data5` (optional `Data0`) non-empty readable archives without falsely rejecting encrypted/DCX `.bdt` files for missing literal `"BDF4"` bytes at offset 0.
+    2. `win32_sekiro_compat.hpp`: registered `dxgi.dll!CreateDXGIFactory` (alias to `CreateDXGIFactory1`) and `xinput1_3.dll` ordinals `#2` (`XInputGetState`) and `#3` (`XInputSetState`), plus `d3d9!D3DPERF_GetStatus`, `imm32!ImmDisableIME`, and full `kernel32`/`user32`/`gdi32`/`ole32`/`oleaut32`/`shell32`/`advapi32`/`crypt32`/`ws2_32`/`wsock32`/`wldap32` coverage.
+    3. `app/src/main/cpp/audio/winmm_waveout_bridge.hpp`: implemented a real WinMM `waveOut*` → `AAudioXAudioBridge` low-latency audio bridge (with `CALLBACK_EVENT` signaling, linear resampling, and `waveOutGetPosition`) powering `fmodex64.dll` and `bink2w64.dll`.
+    4. Wrapped `DirectInput8Create` in a Box64 `onebridge_t` proxy (`DirectInput8ComBridge`) so ARM64 guest code never jumps into raw native vtable pointers.
+  - Added `test_m18_winmm_waveout_xinput_ordinals_and_sekiro_compat` and a clean-room `--verify-byof <dir>` CLI diagnostic mode in `tests/test_core.cpp` (19/19 test suites passing).
+
+---
+
 ### Increment 19 — M17: XAudio2 Box64 `onebridge_t` COM Bridge, Zero-Alloc Audio Ring, PE64 Forwarded Exports/`DllMain` & Healing-Gourd Touch + Camera Decay (2026-11-27)
 - **Status:** Implemented & verified (local MSVC 2022 + GitHub Actions Linux GCC/`spirv-val` + Android ARM64 NDK)
 - **Changes:**

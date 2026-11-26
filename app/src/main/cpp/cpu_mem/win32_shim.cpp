@@ -3,6 +3,7 @@
 #include "pe_loader.hpp"
 #include "win32_ext_shims.hpp"
 #include "../audio/aaudio_xaudio_bridge.hpp"
+#include "../audio/winmm_waveout_bridge.hpp"
 #include "../audio/xaudio2_com_bridge.hpp"
 #include "../gfx/d3d11_com_bridge.hpp"
 #include "../gfx/dxvk_interop.hpp"
@@ -1609,6 +1610,8 @@ bool Box64Bridge::invoke_thunk(const std::string& dll_lower, const std::string& 
     return true;
 }
 
+#include "win32_sekiro_compat.hpp"
+
 void Box64Bridge::register_default_win32_thunks() {
     // Memory
     register_thunk("kernel32.dll", "VirtualAlloc", &thunk_VirtualAlloc);
@@ -1888,6 +1891,8 @@ void Box64Bridge::register_default_win32_thunks() {
     register_thunk("kernel32.dll", "GetLogicalProcessorInformationEx", &thunk_ReturnZero);
     register_thunk("xinput1_4.dll", "XInputGetCapabilities", &thunk_XInputGetCapabilities);
     register_thunk("xinput1_3.dll", "XInputGetCapabilities", &thunk_XInputGetCapabilities);
+
+    register_sekiro_compat_thunks(*this);
 }
 
 } // namespace mobiro::cpu
