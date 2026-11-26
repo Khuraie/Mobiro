@@ -1,4 +1,4 @@
-package com.sekiro.native.runtime
+package com.mobiro.runtime
 
 import android.content.Context
 import android.os.Build

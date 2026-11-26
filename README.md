@@ -21,7 +21,7 @@
 
 ```text
 app/src/main/
-├── java/com/sekiro/native/runtime/
+├── java/com/mobiro/runtime/
 │   ├── MainActivity.kt              # GameActivity + SAF BYOF directory binding + trim/thermal hooks
 │   └── ThermalMonitor.kt            # Android PowerManager thermal headroom monitor
 ├── assets/config/dxvk.base.conf     # Base Sekiro + Turnip DXVK profile

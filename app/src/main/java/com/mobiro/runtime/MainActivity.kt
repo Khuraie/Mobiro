@@ -1,4 +1,4 @@
-package com.sekiro.native.runtime
+package com.mobiro.runtime
 
 import android.content.ComponentCallbacks2
 import android.content.Intent
@@ -27,7 +27,6 @@ class MainActivity : GameActivity() {
                 uri,
                 Intent.FLAG_GRANT_READ_URI_PERMISSION
             )
-            // Resolve to local app-scoped directory or SAF path hint
             val resolved = resolveByofPath(uri)
             if (resolved != null) {
                 prefs().edit().putString(KEY_BYOF_PATH, resolved).apply()
@@ -98,7 +97,7 @@ class MainActivity : GameActivity() {
         return null
     }
 
-    private fun prefs() = getSharedPreferences("sekiro_runtime_prefs", MODE_PRIVATE)
+    private fun prefs() = getSharedPreferences("mobiro_runtime_prefs", MODE_PRIVATE)
 
     @Suppress("DEPRECATION")
     private fun hideSystemUi() {
@@ -122,7 +121,7 @@ class MainActivity : GameActivity() {
     private external fun nativeOnThermalHeadroom(headroom: Float)
 
     companion object {
-        private const val TAG = "SekiroRuntime"
+        private const val TAG = "Mobiro"
         private const val KEY_BYOF_PATH = "byof_game_dir"
     }
 }

@@ -4,12 +4,12 @@ plugins {
 }
 
 android {
-    namespace = "com.sekiro.native.runtime"
+    namespace = "com.mobiro.runtime"
     compileSdk = 35
     ndkVersion = "27.2.12479018"
 
     defaultConfig {
-        applicationId = "com.sekiro.native.runtime"
+        applicationId = "com.mobiro.runtime"
         minSdk = 31 // Android 12+ for ADPF APerformanceHintManager & Vulkan 1.1+
         targetSdk = 35
         versionCode = 1

@@ -86,7 +86,7 @@ void process_game_activity_input(android_app* app) {
 } // namespace
 
 extern "C" JNIEXPORT jstring JNICALL
-Java_com_sekiro_native_runtime_MainActivity_nativeConfigureAndValidate(
+Java_com_mobiro_runtime_MainActivity_nativeConfigureAndValidate(
     JNIEnv* env, jobject /*thiz*/, jstring jGameDir, jstring jCacheDir, jstring jNativeLibDir) {
     const char* c_game = env->GetStringUTFChars(jGameDir, nullptr);
     const char* c_cache = env->GetStringUTFChars(jCacheDir, nullptr);
@@ -153,14 +153,14 @@ Java_com_sekiro_native_runtime_MainActivity_nativeConfigureAndValidate(
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_sekiro_native_runtime_MainActivity_nativeOnMemoryPressure(
+Java_com_mobiro_runtime_MainActivity_nativeOnMemoryPressure(
     JNIEnv* /*env*/, jobject /*thiz*/, jint trimLevel) {
     __android_log_print(ANDROID_LOG_WARN, kLogTag, "Memory trim level=%d; reclaiming pages", trimLevel);
     g_rt.arena.trim_unused_pages();
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_sekiro_native_runtime_MainActivity_nativeOnThermalHeadroom(
+Java_com_mobiro_runtime_MainActivity_nativeOnThermalHeadroom(
     JNIEnv* /*env*/, jobject /*thiz*/, jfloat headroom) {
     // Step down from 60 -> 30 FPS cleanly before aggressive thermal throttling hits
     int desired = (headroom >= 0.85f) ? 30 : 60;
