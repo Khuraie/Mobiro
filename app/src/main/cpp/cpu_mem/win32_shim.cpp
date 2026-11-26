@@ -2122,6 +2122,75 @@ void thunk_PathFileExistsW(x64emu_t* emu) {
     reg_rax(emu) = (b && b->vfs() && path && b->vfs()->resolve(win32::utf16le_to_utf8(path), host)) ? 1ULL : 0ULL;
 }
 
+void thunk_NtProtectVirtualMemory(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    auto* pbase = reinterpret_cast<uint64_t*>(reg_rdx(emu));
+    auto* psize = reinterpret_cast<uint64_t*>(reg_r8(emu));
+    const uint32_t new_prot = static_cast<uint32_t>(reg_r9(emu));
+    auto* pold = reinterpret_cast<uint32_t*>(stack_arg(emu, 0));
+    if (pold) *pold = 0x40u;
+    if (b && b->arena() && pbase && psize && *pbase && *psize) {
+        b->arena()->protect(static_cast<uintptr_t>(*pbase), static_cast<size_t>(*psize),
+                            mem::GuestArena::from_win32_protect(new_prot));
+    }
+    reg_rax(emu) = 0ULL; // STATUS_SUCCESS
+}
+
+void thunk_NtAllocateVirtualMemory(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    auto* pbase = reinterpret_cast<uint64_t*>(reg_rdx(emu));
+    auto* psize = reinterpret_cast<uint64_t*>(reg_r9(emu));
+    const uint32_t alloc_type = static_cast<uint32_t>(stack_arg(emu, 0));
+    const uint32_t prot = static_cast<uint32_t>(stack_arg(emu, 1));
+    if (!b || !b->arena() || !pbase || !psize || *psize == 0) {
+        reg_rax(emu) = 0xC000000DULL;
+        return;
+    }
+    const bool commit = (alloc_type & 0x1000u) != 0 || alloc_type == 0;
+    const uintptr_t va = b->arena()->virtual_alloc(
+        static_cast<uintptr_t>(*pbase), static_cast<size_t>(*psize),
+        mem::GuestArena::from_win32_protect(prot), commit);
+    if (!va) { reg_rax(emu) = 0xC0000017ULL; return; }
+    *pbase = static_cast<uint64_t>(va);
+    reg_rax(emu) = 0ULL; // STATUS_SUCCESS
+}
+
+void thunk_NtDelayExecution(x64emu_t* emu) {
+    const auto* interval = reinterpret_cast<const int64_t*>(reg_rdx(emu));
+    if (interval && *interval < 0) {
+        const int64_t us = (-*interval) / 10;
+        if (us > 0 && us < 5'000'000) {
+            std::this_thread::sleep_for(std::chrono::microseconds(us));
+        }
+    }
+    reg_rax(emu) = 0ULL;
+}
+
+void thunk_NtQueryPerformanceCounter(x64emu_t* emu) {
+    const auto now = std::chrono::steady_clock::now().time_since_epoch();
+    const int64_t ticks = std::chrono::duration_cast<std::chrono::nanoseconds>(now).count() / 100; // 10 MHz
+    if (auto* cnt = reinterpret_cast<int64_t*>(reg_rcx(emu))) *cnt = ticks;
+    if (auto* freq = reinterpret_cast<int64_t*>(reg_rdx(emu))) *freq = 10'000'000LL;
+    reg_rax(emu) = 0ULL;
+}
+
+void thunk_NtStatusNotFound(x64emu_t* emu) { reg_rax(emu) = 0xC0000034ULL; } // STATUS_OBJECT_NAME_NOT_FOUND
+
+void thunk_RtlInitUnicodeString(x64emu_t* emu) {
+    auto* us = reinterpret_cast<uint8_t*>(reg_rcx(emu));
+    const auto* src = reinterpret_cast<const uint16_t*>(reg_rdx(emu));
+    if (!us) { reg_rax(emu) = 0ULL; return; }
+    size_t len = 0;
+    if (src) { while (src[len] && len < 32766) ++len; }
+    const uint16_t bytes = static_cast<uint16_t>(len * 2);
+    const uint16_t max_bytes = src ? static_cast<uint16_t>(bytes + 2) : 0u;
+    const uint64_t buf = reinterpret_cast<uintptr_t>(src);
+    std::memcpy(us + 0, &bytes, 2);
+    std::memcpy(us + 2, &max_bytes, 2);
+    std::memcpy(us + 8, &buf, 8);
+    reg_rax(emu) = 0ULL;
+}
+
 void thunk_XInputGetCapabilities(x64emu_t* emu) {
     const uint32_t user_idx = static_cast<uint32_t>(reg_rcx(emu));
     auto* caps = reinterpret_cast<uint8_t*>(reg_r8(emu));
@@ -2989,6 +3058,53 @@ void Box64Bridge::register_default_win32_thunks() {
     register_thunk("version.dll", "VerQueryValueA", &thunk_ReturnZero);
     register_thunk("version.dll", "VerQueryValueW", &thunk_ReturnZero);
     register_thunk("shell32.dll", "ShellExecuteW", &thunk_ReturnZero);
+
+    // M21: Complete ntdll.dll Nt*/Zw*/Rtl* dynamic lookups (NtSetInformationThread, memory, sync, timers)
+    const char* ntdll_ok[] = {
+        "NtSetInformationThread", "ZwSetInformationThread",
+        "NtQueryInformationThread", "ZwQueryInformationThread",
+        "NtSetInformationProcess", "ZwSetInformationProcess",
+        "ZwQueryInformationProcess", "ZwQuerySystemInformation",
+        "NtQueryVirtualMemory", "ZwQueryVirtualMemory",
+        "NtFreeVirtualMemory", "ZwFreeVirtualMemory",
+        "NtFlushInstructionCache", "ZwFlushInstructionCache",
+        "NtYieldExecution", "ZwYieldExecution",
+        "NtDuplicateObject", "ZwDuplicateObject",
+        "NtSuspendThread", "NtResumeThread",
+        "NtGetContextThread", "NtSetContextThread",
+        "NtRaiseHardError", "NtRaiseException",
+        "RtlNtStatusToDosError", "RtlVerifyVersionInfo",
+        "RtlAddVectoredExceptionHandler", "RtlRemoveVectoredExceptionHandler",
+        "RtlCaptureStackBackTrace", "RtlExitUserThread", "RtlExitUserProcess"
+    };
+    for (const char* sym : ntdll_ok) {
+        register_thunk("ntdll.dll", sym, &thunk_ReturnZero);
+    }
+    register_thunk("ntdll.dll", "NtProtectVirtualMemory", &thunk_NtProtectVirtualMemory);
+    register_thunk("ntdll.dll", "ZwProtectVirtualMemory", &thunk_NtProtectVirtualMemory);
+    register_thunk("ntdll.dll", "NtAllocateVirtualMemory", &thunk_NtAllocateVirtualMemory);
+    register_thunk("ntdll.dll", "ZwAllocateVirtualMemory", &thunk_NtAllocateVirtualMemory);
+    register_thunk("ntdll.dll", "NtDelayExecution", &thunk_NtDelayExecution);
+    register_thunk("ntdll.dll", "ZwDelayExecution", &thunk_NtDelayExecution);
+    register_thunk("ntdll.dll", "NtQueryPerformanceCounter", &thunk_NtQueryPerformanceCounter);
+    register_thunk("ntdll.dll", "ZwQueryPerformanceCounter", &thunk_NtQueryPerformanceCounter);
+    register_thunk("ntdll.dll", "ZwClose", &thunk_CloseHandle);
+    register_thunk("ntdll.dll", "NtOpenKey", &thunk_NtStatusNotFound);
+    register_thunk("ntdll.dll", "ZwOpenKey", &thunk_NtStatusNotFound);
+    register_thunk("ntdll.dll", "NtQueryValueKey", &thunk_NtStatusNotFound);
+    register_thunk("ntdll.dll", "ZwQueryValueKey", &thunk_NtStatusNotFound);
+    register_thunk("ntdll.dll", "RtlInitUnicodeString", &thunk_RtlInitUnicodeString);
+    register_thunk("ntdll.dll", "RtlAllocateHeap", &thunk_HeapAlloc);
+    register_thunk("ntdll.dll", "RtlFreeHeap", &thunk_HeapFree);
+    register_thunk("ntdll.dll", "RtlReAllocateHeap", &thunk_HeapReAlloc);
+    register_thunk("ntdll.dll", "RtlSizeHeap", &thunk_HeapSize);
+    register_thunk("ntdll.dll", "RtlInitializeCriticalSection", &thunk_InitializeCriticalSection);
+    register_thunk("ntdll.dll", "RtlEnterCriticalSection", &thunk_EnterCriticalSection);
+    register_thunk("ntdll.dll", "RtlLeaveCriticalSection", &thunk_LeaveCriticalSection);
+    register_thunk("ntdll.dll", "RtlTryEnterCriticalSection", &thunk_TryEnterCriticalSection);
+    register_thunk("ntdll.dll", "RtlDeleteCriticalSection", &thunk_DeleteCriticalSection);
+    register_thunk("ntdll.dll", "RtlGetLastWin32Error", &thunk_GetLastError);
+    register_thunk("ntdll.dll", "RtlSetLastWin32Error", &thunk_SetLastError);
 
     register_sekiro_compat_thunks(*this);
 }
