@@ -39,6 +39,8 @@ static const uint8_t g_box64_exit_stub[32] __attribute__((aligned(32))) = {
     0xC3
 };
 
+extern FILE* ftrace;
+
 static pthread_once_t g_box64_ctx_once = PTHREAD_ONCE_INIT;
 
 static void mobiro_init_box64_context_once(void) {
