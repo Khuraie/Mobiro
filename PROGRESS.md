@@ -6,6 +6,17 @@
 
 ## Log Entries
 
+### Increment 14 — M12: Dependent BYOF DLL Auto-Load, Safe Unresolved-Import Traps, Default `CreateThread` Execution & Android Diagnostics (2026-11-27)
+- **Status:** Implemented & verified (local MSVC 2022 + GitHub Actions Linux GCC/`spirv-val` + Android ARM64 NDK)
+- **Changes:**
+  - Added recursive BYOF dependent guest DLL auto-loading (with cycle guard) in `PeLoader::load_pe64` (`app/src/main/cpp/cpu_mem/pe_loader.hpp`) so statically imported game-shipped DLLs (e.g. `oo2core_6_win64.dll`, `bink2w64.dll`) map and bind automatically before main IAT patching.
+  - Added safe `onebridge_t` unresolved-import trap stubs (`Box64Bridge::resolve_unresolved_trap` / `mobiro_unresolved_import_wrapper` in `box64_bridge.hpp` + `win32_shim.cpp`) so calling an unimplemented Win32 API logs the exact `dll!symbol` to Android `logcat` + telemetry and returns `0` cleanly instead of jumping to an unmapped RVA.
+  - Wired default `GuestExecutor::call_guest_fn` execution into `GuestThreadTable` (`win32_thread_wait.hpp` + `Box64Bridge::initialize`) so every guest `CreateThread` runs real x86_64 code on its own TEB + 512 KB stack + EngineWorker core automatically.
+  - Added `TouchOverlayVk::pipeline_spec()` and `resolve_device_draw_procs()` (`touch_overlay_vk.hpp`), plus `nativeGetDiagnosticsSummary()` JNI status reporting in `runtime_main.cpp` and `MainActivity.kt`.
+  - Added `test_m12_dep_dll_unresolved_trap_and_create_thread_exec` in `tests/test_core.cpp` (13/13 test suites passing).
+
+---
+
 ### Increment 13 — M11: Box64 `onebridge_t` Live Native-Thunk Dispatch, Prime-Core Guest Entry Thread & `ntdll`/CRT Sync Expansion (2026-11-27)
 - **Status:** Implemented & verified (local MSVC 2022 + GitHub Actions Linux GCC/`spirv-val` + Android ARM64 NDK)
 - **Changes:**
@@ -157,4 +168,4 @@
 ---
 
 ## Upcoming Increments
-- **Increment 14 (M12 — In-Swapchain Vulkan Touch HUD Composition & On-Device Adreno 7xx/8xx Boot):** Bind `TouchOverlayVk` into active Vulkan swapchain presentation, add runtime diagnostics for unresolved PE64 imports & guest crash telemetry, and validate first real-device Adreno 7xx/8xx boot with user-supplied `Sekiro.exe`.
+- **Increment 15 (M13 — Live Adreno 7xx/8xx Boot Triage & In-Swapchain HUD Hook):** Rebuild the bundled APK via `build-third-party.yml`, test first real-device Adreno 7xx/8xx launch against user-supplied BYOF `Sekiro.exe`, close any newly reported `unresolved IAT` calls from `logcat`, and attach `TouchOverlayVk` into DXVK's live Vulkan present pass.

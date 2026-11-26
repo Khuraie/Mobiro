@@ -171,6 +171,28 @@ public:
                                                const uint64_t* buffers, const uint64_t* offsets);
     using PfnVkCmdDraw = void (*)(void* cmd, uint32_t vtx_count, uint32_t inst_count,
                                   uint32_t first_vtx, uint32_t first_inst);
+    using PfnGetDeviceProcAddr = void* (*)(void* device, const char* name);
+
+    struct VertexInputAttrSpec {
+        uint32_t location;
+        uint32_t binding;
+        uint32_t vk_format; // VK_FORMAT_R32G32_SFLOAT=103, VK_FORMAT_R32G32B32A32_SFLOAT=109
+        uint32_t offset;
+    };
+
+    struct HudPipelineSpec {
+        const uint32_t* vert_spv = spirv::kHudVertSpv;
+        size_t vert_spv_bytes = sizeof(spirv::kHudVertSpv);
+        const uint32_t* frag_spv = spirv::kHudFragSpv;
+        size_t frag_spv_bytes = sizeof(spirv::kHudFragSpv);
+        uint32_t vertex_stride = sizeof(HudVertex);
+        VertexInputAttrSpec attrs[2] = {
+            {0u, 0u, 103u, offsetof(HudVertex, x)},
+            {1u, 0u, 109u, offsetof(HudVertex, r)}
+        };
+    };
+
+    static HudPipelineSpec pipeline_spec() { return HudPipelineSpec{}; }
 
     struct VkDrawBindings {
         uint64_t pipeline = 0;
@@ -181,6 +203,15 @@ public:
         PfnVkCmdBindVertexBuffers cmd_bind_vbo = nullptr;
         PfnVkCmdDraw cmd_draw = nullptr;
     };
+
+    // Dynamically resolves vkCmdBindPipeline / vkCmdBindVertexBuffers / vkCmdDraw from a live VkDevice
+    bool resolve_device_draw_procs(void* vk_device, PfnGetDeviceProcAddr gdpa) {
+        if (!vk_device || !gdpa) return false;
+        bindings_.cmd_bind_pipeline = reinterpret_cast<PfnVkCmdBindPipeline>(gdpa(vk_device, "vkCmdBindPipeline"));
+        bindings_.cmd_bind_vbo = reinterpret_cast<PfnVkCmdBindVertexBuffers>(gdpa(vk_device, "vkCmdBindVertexBuffers"));
+        bindings_.cmd_draw = reinterpret_cast<PfnVkCmdDraw>(gdpa(vk_device, "vkCmdDraw"));
+        return bindings_.cmd_bind_pipeline && bindings_.cmd_bind_vbo && bindings_.cmd_draw;
+    }
 
     void attach_draw_bindings(const VkDrawBindings& b) { bindings_ = b; }
 

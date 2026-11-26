@@ -1439,6 +1439,130 @@ void test_m11_box64_onebridge_condvar_sem_and_crt() {
     fs::remove_all(save_ov);
 }
 
+void test_m12_dep_dll_unresolved_trap_and_create_thread_exec() {
+    const fs::path tmp = fs::temp_directory_path() / "mobiro_test_m12";
+    fs::remove_all(tmp);
+    fs::create_directories(tmp);
+    write_synthetic_pe64_dll(tmp / "dep_helper.dll");
+
+    // Build an EXE importing dep_helper.dll!MobiroExportedFn AND kernel32.dll!NonExistentFutureApi
+    std::vector<uint8_t> exe(0xC00, 0);
+    exe[0] = 'M'; exe[1] = 'Z';
+    const uint32_t pe_off = 0x80;
+    wr32(exe, 0x3C, pe_off);
+    exe[pe_off] = 'P'; exe[pe_off + 1] = 'E';
+    const size_t coff = pe_off + 4;
+    wr16(exe, coff + 0, 0x8664);
+    wr16(exe, coff + 2, 2);
+    const uint16_t opt_size = 0xF0;
+    wr16(exe, coff + 16, opt_size);
+    const size_t opt = coff + 20;
+    wr16(exe, opt + 0, 0x020B);
+    wr32(exe, opt + 16, 0x1000);
+    wr64(exe, opt + 24, 0x0000000140000000ULL);
+    wr32(exe, opt + 56, 0x3000);
+    wr32(exe, opt + 60, 0x400);
+    wr32(exe, opt + 108, 16);
+    wr32(exe, opt + 112 + 1 * 8, 0x2000);     // Import Dir RVA
+    wr32(exe, opt + 112 + 1 * 8 + 4, 0x200);
+
+    const size_t sec0 = opt + opt_size;
+    std::memcpy(&exe[sec0], ".text", 5);
+    wr32(exe, sec0 + 8, 0x400); wr32(exe, sec0 + 12, 0x1000);
+    wr32(exe, sec0 + 16, 0x400); wr32(exe, sec0 + 20, 0x400);
+    wr32(exe, sec0 + 36, 0x60000020u);
+
+    const size_t sec1 = sec0 + 40;
+    std::memcpy(&exe[sec1], ".idata", 6);
+    wr32(exe, sec1 + 8, 0x400); wr32(exe, sec1 + 12, 0x2000);
+    wr32(exe, sec1 + 16, 0x400); wr32(exe, sec1 + 20, 0x800);
+    wr32(exe, sec1 + 36, 0xC0000040u);
+
+    // .text at RVA 0x1000 (file 0x400):
+    //   CALL [RIP + (0x2080 - 0x1006)] -> dep_helper.dll!MobiroExportedFn (RET)
+    //   CALL [RIP + (0x2090 - 0x100C)] -> kernel32.dll!NonExistentFutureApi (safe trap -> RAX=0)
+    //   RET
+    size_t c = 0x400;
+    exe[c++] = 0xFF; exe[c++] = 0x15;
+    wr32(exe, c, 0x2080 - 0x1006); c += 4;
+    exe[c++] = 0xFF; exe[c++] = 0x15;
+    wr32(exe, c, 0x2090 - 0x100C); c += 4;
+    exe[c++] = 0xC3;
+
+    // Import Descriptor 0: dep_helper.dll -> IAT at 0x2080
+    wr32(exe, 0x800 + 0,  0x2080);
+    wr32(exe, 0x800 + 12, 0x20B0);
+    wr32(exe, 0x800 + 16, 0x2080);
+    // Import Descriptor 1: kernel32.dll -> IAT at 0x2090
+    wr32(exe, 0x814 + 0,  0x2090);
+    wr32(exe, 0x814 + 12, 0x20C0);
+    wr32(exe, 0x814 + 16, 0x2090);
+
+    wr64(exe, 0x880, 0x20D0); // IBN for MobiroExportedFn
+    wr64(exe, 0x890, 0x20F0); // IBN for NonExistentFutureApi
+    std::memcpy(&exe[0x8B0], "dep_helper.dll", 15);
+    std::memcpy(&exe[0x8C0], "kernel32.dll", 13);
+    std::memcpy(&exe[0x8D2], "MobiroExportedFn", 17);
+    std::memcpy(&exe[0x8F2], "NonExistentFutureApi", 21);
+
+    {
+        std::ofstream f(tmp / "dep_app.exe", std::ios::binary | std::ios::trunc);
+        f.write(reinterpret_cast<const char*>(exe.data()), static_cast<std::streamsize>(exe.size()));
+    }
+
+    mobiro::validator::VfsMapper vfs;
+    assert(vfs.index_root(tmp.string()));
+    mobiro::mem::GuestArena arena;
+    assert(arena.reserve(0x0000000100000000ULL, 128ULL * 1024 * 1024));
+    mobiro::cpu::Box64Bridge bridge;
+    assert(bridge.initialize(&arena, &vfs));
+
+    auto loaded = mobiro::cpu::PeLoader::load_pe64((tmp / "dep_app.exe").string(), arena, bridge, /*force_relocate=*/true);
+    assert(loaded.ok);
+    assert(loaded.imports_resolved == 1);
+    assert(loaded.unresolved_imports.size() == 1);
+    assert(bridge.modules().find_module("dep_helper.dll") != 0);
+
+    mobiro::cpu::Win64ThreadEnv tenv;
+    assert(tenv.init_main_thread(arena, loaded.mapped_base, 8, 1000, 1));
+    auto res = mobiro::cpu::GuestExecutor::run_entry(loaded, tenv, bridge);
+    assert(res.ok && res.exit_rax == 0 && res.thunks_dispatched == 1);
+
+    auto called = bridge.called_unresolved_imports();
+    assert(called.size() == 1 && called[0] == "kernel32.dll!NonExistentFutureApi");
+
+    // 2. Default CreateThread executes real guest x86_64 code via GuestExecutor without a test override
+    const uintptr_t worker_pc = arena.virtual_alloc(
+        0, 4096, mobiro::mem::kProtRead | mobiro::mem::kProtWrite | mobiro::mem::kProtExec, true);
+    assert(worker_pc != 0);
+    const uint8_t worker_code[] = {
+        0x48, 0xB8, 0xFE, 0xCA, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov rax, 0xCAFE
+        0xC3                                                        // ret
+    };
+    std::memcpy(reinterpret_cast<void*>(worker_pc), worker_code, sizeof(worker_code));
+    uint32_t tid = 0;
+    const uint64_t hth = bridge.threads().create_thread(&arena, loaded.mapped_base, worker_pc, 0, &tid);
+    assert(hth != 0 && tid >= 200);
+    assert(bridge.threads().wait_single(hth, 2000) == mobiro::win32::EventTable::kWaitObject0);
+    assert(bridge.threads().close(hth));
+
+    // 3. TouchOverlayVk pipeline spec + dynamic VkDevice proc resolution
+    auto spec = mobiro::gfx::TouchOverlayVk::pipeline_spec();
+    assert(spec.vertex_stride == 24 && spec.attrs[0].offset == 0 && spec.attrs[1].offset == 8);
+    assert(spec.vert_spv_bytes == sizeof(mobiro::gfx::spirv::kHudVertSpv));
+    mobiro::gfx::TouchOverlayVk ov;
+    int fake_vk_dev = 1;
+    assert(ov.resolve_device_draw_procs(&fake_vk_dev, [](void*, const char* name) -> void* {
+        if (std::strcmp(name, "vkCmdBindPipeline") == 0) return reinterpret_cast<void*>(0x1111);
+        if (std::strcmp(name, "vkCmdBindVertexBuffers") == 0) return reinterpret_cast<void*>(0x2222);
+        if (std::strcmp(name, "vkCmdDraw") == 0) return reinterpret_cast<void*>(0x3333);
+        return nullptr;
+    }));
+
+    bridge.shutdown();
+    fs::remove_all(tmp);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1465,6 +1589,7 @@ int main(int argc, char** argv) {
     test_d3d11_com_bridge_ext_win32_and_hud_draw();
     test_m10_xmm_com_auto_wrap_and_dllmain_tls();
     test_m11_box64_onebridge_condvar_sem_and_crt();
+    test_m12_dep_dll_unresolved_trap_and_create_thread_exec();
     std::cout << "All Mobiro core unit tests passed.\n";
     return 0;
 }

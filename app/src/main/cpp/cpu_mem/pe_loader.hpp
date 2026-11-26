@@ -9,6 +9,7 @@
 #include <fstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace mobiro::cpu {
@@ -38,6 +39,16 @@ public:
                                    mem::GuestArena& arena,
                                    Box64Bridge& bridge,
                                    bool force_relocate = false) {
+        std::unordered_set<std::string> active_stack;
+        return load_pe64_impl(exe_path, arena, bridge, force_relocate, active_stack);
+    }
+
+private:
+    static LoadedPeImage load_pe64_impl(const std::string& exe_path,
+                                        mem::GuestArena& arena,
+                                        Box64Bridge& bridge,
+                                        bool force_relocate,
+                                        std::unordered_set<std::string>& active_stack) {
         LoadedPeImage res;
         std::ifstream f(exe_path, std::ios::binary | std::ios::ate);
         if (!f) {
@@ -190,6 +201,26 @@ public:
                 if (name_rva >= size_of_image || first_thunk >= size_of_image) break;
 
                 const std::string dll_name(reinterpret_cast<const char*>(base_ptr + name_rva));
+                const std::string dll_key = win32::ModuleRegistry::basename_lower(dll_name);
+                // Auto-load dependent BYOF guest DLLs (e.g. oo2core_6_win64.dll, bink2w64.dll) before patching IAT
+                if (!bridge.has_dll_thunks(dll_name) &&
+                    !bridge.modules().find_module(dll_name) &&
+                    active_stack.find(dll_key) == active_stack.end() &&
+                    bridge.vfs()) {
+                    std::string dep_host;
+                    if (bridge.vfs()->resolve(dll_name, dep_host)) {
+                        active_stack.insert(dll_key);
+                        auto dep = load_pe64_impl(dep_host, arena, bridge, /*force_relocate=*/true, active_stack);
+                        if (dep.ok) {
+                            if (dep.pdata_va && dep.pdata_size) {
+                                bridge.seh().register_image(dep.mapped_base, dep.pdata_va, dep.pdata_size);
+                            }
+                            bridge.modules().register_guest_module(
+                                dll_name, dep.mapped_base, dep.image_size,
+                                std::move(dep.exports_by_name), std::move(dep.exports_by_ordinal));
+                        }
+                    }
+                }
                 const uint32_t lookup_base = orig_thunk ? orig_thunk : first_thunk;
 
                 for (uint32_t idx = 0; ; ++idx) {
@@ -220,6 +251,11 @@ public:
                         ++res.imports_resolved;
                     } else {
                         res.unresolved_imports.push_back(dll_name + "!" + sym_name);
+                        // Patch with a safe logging onebridge_t trap instead of leaving an unmapped RVA in IAT
+                        if (const uintptr_t trap = bridge.resolve_unresolved_trap(dll_name, sym_name)) {
+                            uint64_t patched = static_cast<uint64_t>(trap);
+                            std::memcpy(base_ptr + i_rva, &patched, 8);
+                        }
                     }
                 }
             }

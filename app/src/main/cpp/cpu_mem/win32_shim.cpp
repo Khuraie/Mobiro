@@ -16,6 +16,9 @@
 #if defined(__linux__) || defined(__ANDROID__)
 #include <sys/mman.h>
 #endif
+#if defined(__ANDROID__)
+#include <android/log.h>
+#endif
 
 namespace mobiro::cpu {
 
@@ -1140,6 +1143,11 @@ bool Box64Bridge::initialize(mem::GuestArena* arena, validator::VfsMapper* vfs) 
 #endif
     stub_count_ = 0;
     heap_.initialize(arena_, 32 * 1024 * 1024);
+    threads_.set_env_dispatch_callback(
+        [](uintptr_t start_pc, uintptr_t param, const Win64ThreadEnv& env) -> uint32_t {
+            auto r = GuestExecutor::call_guest_fn(start_pc, param, 0ULL, 0ULL, env);
+            return static_cast<uint32_t>(r.exit_rax);
+        });
     register_default_win32_thunks();
     return true;
 }
@@ -1154,6 +1162,12 @@ void Box64Bridge::shutdown() {
     modules_.clear();
     window_.clear();
     heap_.reset();
+    {
+        std::lock_guard<std::mutex> lk(unresolved_mu_);
+        interned_unresolved_.clear();
+        unresolved_stub_cache_.clear();
+        called_unresolved_.clear();
+    }
     if (stub_pool_) {
 #if defined(__linux__) || defined(__ANDROID__)
         munmap(stub_pool_, kMaxStubs * sizeof(NativeBridgeStub));
@@ -1179,6 +1193,53 @@ uintptr_t Box64Bridge::resolve_import(const std::string& dll_lower, const std::s
     stub.wrapper_ptr = reinterpret_cast<uint64_t>(&mobiro_native_thunk_wrapper);
     stub.thunk_ptr = reinterpret_cast<uint64_t>(it->second);
     return reinterpret_cast<uintptr_t>(&stub);
+}
+
+extern "C" void mobiro_unresolved_import_wrapper(x64emu_t* emu, uintptr_t name_ptr) {
+    const char* name = reinterpret_cast<const char*>(name_ptr);
+    if (auto* b = Box64Bridge::instance()) {
+        b->record_unresolved_call(name);
+    }
+#if defined(__ANDROID__)
+    __android_log_print(ANDROID_LOG_WARN, "Mobiro", "Unresolved Win32 import called: %s (returning 0)",
+                        name ? name : "<unknown>");
+#endif
+    if (emu) emu_reg_rax(emu) = 0ULL;
+}
+
+uintptr_t Box64Bridge::resolve_unresolved_trap(const std::string& dll_lower, const std::string& symbol) {
+    if (!stub_pool_) return 0;
+    const std::string key = validator::VfsMapper::normalize(dll_lower) + "!" + symbol;
+    std::lock_guard<std::mutex> lk(unresolved_mu_);
+    if (auto it = unresolved_stub_cache_.find(key); it != unresolved_stub_cache_.end()) {
+        return it->second;
+    }
+    if (stub_count_ >= kMaxStubs) return 0;
+
+    interned_unresolved_.push_back(key);
+    const char* stable_name = interned_unresolved_.back().c_str();
+    NativeBridgeStub& stub = stub_pool_[stub_count_++];
+    stub = NativeBridgeStub{};
+    stub.wrapper_ptr = reinterpret_cast<uint64_t>(&mobiro_unresolved_import_wrapper);
+    stub.thunk_ptr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(stable_name));
+    stub.name_or_func = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(stable_name));
+    const uintptr_t addr = reinterpret_cast<uintptr_t>(&stub);
+    unresolved_stub_cache_[key] = addr;
+    return addr;
+}
+
+void Box64Bridge::record_unresolved_call(const char* sym_name) {
+    if (!sym_name) return;
+    std::lock_guard<std::mutex> lk(unresolved_mu_);
+    for (const auto& s : called_unresolved_) {
+        if (s == sym_name) return;
+    }
+    called_unresolved_.emplace_back(sym_name);
+}
+
+std::vector<std::string> Box64Bridge::called_unresolved_imports() const {
+    std::lock_guard<std::mutex> lk(unresolved_mu_);
+    return called_unresolved_;
 }
 
 bool Box64Bridge::invoke_thunk(const std::string& dll_lower, const std::string& symbol, x64emu_t* emu) const {

@@ -81,6 +81,10 @@ class MainActivity : GameActivity() {
         if (err.isNotEmpty()) {
             Log.e(TAG, "BYOF validation failed: $err")
             Toast.makeText(this, "Validation failed: $err", Toast.LENGTH_LONG).show()
+        } else {
+            val diag = nativeGetDiagnosticsSummary()
+            Log.i(TAG, "Mobiro ready: $diag")
+            Toast.makeText(this, "Mobiro: $diag", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -119,6 +123,7 @@ class MainActivity : GameActivity() {
         nativeLibDir: String
     ): String
 
+    private external fun nativeGetDiagnosticsSummary(): String
     private external fun nativeOnMemoryPressure(trimLevel: Int)
     private external fun nativeOnThermalHeadroom(headroom: Float)
 

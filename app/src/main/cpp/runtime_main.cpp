@@ -44,6 +44,7 @@ struct MobiroRuntimeState {
     mobiro::sched::ThreadBalancer balancer;
     std::atomic<int> target_fps{60};
     std::atomic<bool> configured{false};
+    std::atomic<bool> dxvk_loaded{false};
     std::atomic<bool> guest_started{false};
     std::thread guest_thread;
 };
@@ -193,6 +194,7 @@ Java_com_mobiro_runtime_MainActivity_nativeConfigureAndValidate(
     g_rt.vk_driver = mobiro::gfx::load_vulkan_driver(lib_dir);
     g_rt.touch_overlay.attach_vulkan_loader(g_rt.vk_driver.get_instance_proc_addr);
     const bool dxvk_loaded = mobiro::gfx::DxvkInterop::global().load_native_libraries(lib_dir);
+    g_rt.dxvk_loaded.store(dxvk_loaded, std::memory_order_relaxed);
     mobiro::gfx::D3D11ComBridge::global().set_present_hook(
         [](void*, uint32_t, uint32_t) {
             g_rt.touch_overlay.pack_quads(g_rt.touch_ctrl.build_hud_quads());
@@ -243,7 +245,29 @@ Java_com_mobiro_runtime_MainActivity_nativeConfigureAndValidate(
                         g_rt.pe_image.relocations_applied,
                         g_rt.pe_image.imports_resolved,
                         g_rt.pe_image.unresolved_imports.size());
+    for (size_t i = 0; i < g_rt.pe_image.unresolved_imports.size() && i < 64; ++i) {
+        __android_log_print(ANDROID_LOG_WARN, kLogTag, "  unresolved IAT[%zu]: %s",
+                            i, g_rt.pe_image.unresolved_imports[i].c_str());
+    }
     return env->NewStringUTF("");
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_mobiro_runtime_MainActivity_nativeGetDiagnosticsSummary(JNIEnv* env, jobject /*thiz*/) {
+    const auto called = g_rt.box64.called_unresolved_imports();
+    std::string summary =
+        std::string("Vk=") + (g_rt.vk_driver.using_turnip ? "Turnip" : "System") +
+        " DXVK=" + (g_rt.dxvk_loaded.load(std::memory_order_relaxed) ? "native" : "none") +
+#ifdef MOBIRO_HAVE_BOX64
+        " Box64=embedded" +
+#else
+        " Box64=stub" +
+#endif
+        " IAT=" + std::to_string(g_rt.pe_image.imports_resolved) +
+        "/" + std::to_string(g_rt.pe_image.imports_resolved + g_rt.pe_image.unresolved_imports.size()) +
+        " missingCalled=" + std::to_string(called.size()) +
+        " fps=" + std::to_string(g_rt.target_fps.load(std::memory_order_relaxed));
+    return env->NewStringUTF(summary.c_str());
 }
 
 extern "C" JNIEXPORT void JNICALL

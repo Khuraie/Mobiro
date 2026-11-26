@@ -92,11 +92,13 @@ class GuestThreadTable {
 public:
     static constexpr uint64_t kHandleTag = 0x00030000ULL;
     using ThreadDispatchFn = std::function<uint32_t(uintptr_t start_pc, uintptr_t param, cpu::Win64Teb* teb)>;
+    using EnvDispatchFn = std::function<uint32_t(uintptr_t start_pc, uintptr_t param, const cpu::Win64ThreadEnv& env)>;
 
     ~GuestThreadTable() { join_all(); }
 
     void set_balancer(sched::ThreadBalancer* balancer) { balancer_ = balancer; }
     void set_dispatch_callback(ThreadDispatchFn fn) { dispatch_fn_ = std::move(fn); }
+    void set_env_dispatch_callback(EnvDispatchFn fn) { env_dispatch_fn_ = std::move(fn); }
 
     bool is_thread_handle(uint64_t h) const { return (h & 0xFFFF0000ULL) == kHandleTag; }
 
@@ -118,14 +120,17 @@ public:
         if (out_tid) *out_tid = tid;
 
         auto dispatch = dispatch_fn_;
+        auto env_dispatch = env_dispatch_fn_;
         auto* balancer = balancer_;
-        rec->worker = std::thread([rec, dispatch, balancer, start_pc, param]() {
+        rec->worker = std::thread([rec, dispatch, env_dispatch, balancer, start_pc, param]() {
             if (balancer) {
                 balancer->bind_current_thread(sched::ThreadRole::EngineWorker);
             }
             uint32_t code = 0;
             if (dispatch) {
                 code = dispatch(start_pc, param, rec->env.teb);
+            } else if (env_dispatch) {
+                code = env_dispatch(start_pc, param, rec->env);
             }
             {
                 std::lock_guard<std::mutex> lk(rec->mu);
@@ -200,6 +205,7 @@ private:
     std::atomic<uint32_t> next_tid_{200};
     sched::ThreadBalancer* balancer_ = nullptr;
     ThreadDispatchFn dispatch_fn_;
+    EnvDispatchFn env_dispatch_fn_;
     std::unordered_map<uint64_t, std::shared_ptr<ThreadRec>> threads_;
 };
 

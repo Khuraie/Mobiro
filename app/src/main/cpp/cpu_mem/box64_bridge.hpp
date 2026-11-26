@@ -11,8 +11,11 @@
 
 #include <cstdint>
 #include <cstring>
+#include <deque>
+#include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #ifdef MOBIRO_HAVE_BOX64
 extern "C" {
@@ -154,6 +157,10 @@ public:
 
     void register_thunk(const std::string& dll_lower, const std::string& symbol, NativeThunkFn fn);
     uintptr_t resolve_import(const std::string& dll_lower, const std::string& symbol);
+    // Allocates a safe logging onebridge_t stub for an unresolved import so calling it logs & returns 0 instead of SIGSEGV
+    uintptr_t resolve_unresolved_trap(const std::string& dll_lower, const std::string& symbol);
+    void record_unresolved_call(const char* sym_name);
+    std::vector<std::string> called_unresolved_imports() const;
 
     // Invoke a registered thunk directly (used by Box64 trap dispatch and unit tests)
     bool invoke_thunk(const std::string& dll_lower, const std::string& symbol, x64emu_t* emu) const;
@@ -220,6 +227,10 @@ private:
     size_t stub_count_ = 0;
     static constexpr size_t kMaxStubs = 4096;
     std::unordered_map<std::string, NativeThunkFn> thunks_;
+    mutable std::mutex unresolved_mu_;
+    std::deque<std::string> interned_unresolved_;
+    std::unordered_map<std::string, uintptr_t> unresolved_stub_cache_;
+    std::vector<std::string> called_unresolved_;
     static inline Box64Bridge* g_instance_ = nullptr;
 };
 
