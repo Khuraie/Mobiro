@@ -283,6 +283,9 @@ Java_com_mobiro_runtime_MainActivity_nativeConfigureAndValidate(
     setenv("BOX64_DYNAREC_ALIGNED_ATOMICS", "1", 0);
     setenv("BOX64_DYNAREC_WAIT", "1", 0);
     setenv("BOX64_NOBANNER", "1", 0);
+    const std::string box64_log = (std::filesystem::path(game_dir).parent_path() / "mobiro_box64.log").string();
+    setenv("BOX64_TRACE_FILE", box64_log.c_str(), 1);
+    setenv("BOX64_LOG", "1", 0);
 
     // 4. Load Mesa Turnip ICD (with graceful fallback to system Vulkan) + native AArch64 DXVK
     g_rt.vk_driver = mobiro::gfx::load_vulkan_driver(lib_dir);
@@ -295,10 +298,11 @@ Java_com_mobiro_runtime_MainActivity_nativeConfigureAndValidate(
             const int64_t work_ns = mobiro::gfx::DxvkInterop::global().pace_present();
             if (work_ns > 0) g_rt.balancer.report_frame_work(work_ns);
         });
-    mobiro_boot_log("Vulkan ICD loaded: %s (turnip=%d, dxvk_native=%d)",
+    mobiro_boot_log("Vulkan ICD loaded: %s (turnip=%d, dxvk_native=%d, turnip_err=%s)",
                     g_rt.vk_driver.loaded_path.c_str(),
                     g_rt.vk_driver.using_turnip ? 1 : 0,
-                    dxvk_loaded ? 1 : 0);
+                    dxvk_loaded ? 1 : 0,
+                    g_rt.vk_driver.turnip_error.empty() ? "none" : g_rt.vk_driver.turnip_error.c_str());
 
     // 5. Reserve Win64 guest VA arena & initialize Box64 thunk bridge
     if (!g_rt.arena.reserve(0x0000000100000000ULL, 10ULL * 1024 * 1024 * 1024)) {

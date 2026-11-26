@@ -15,6 +15,7 @@ struct VulkanDriverHandle {
     PfnGetInstanceProcAddr get_instance_proc_addr = nullptr;
     bool using_turnip = false;
     std::string loaded_path;
+    std::string turnip_error;
 };
 
 // Loads open-source Mesa Turnip ICD (libvulkan_freedreno.so) directly from app nativeLibDir
@@ -26,9 +27,18 @@ inline VulkanDriverHandle load_vulkan_driver(const std::string& native_lib_dir) 
     void* h = dlopen(turnip_path.c_str(), RTLD_NOW | RTLD_LOCAL);
     std::string used_path = turnip_path;
     if (!h) {
+        const char* e1 = dlerror();
+        if (e1) res.turnip_error = e1;
         // Android extractNativeLibs="false" keeps .so inside APK; bare soname resolves via linker namespace
         h = dlopen("libvulkan_freedreno.so", RTLD_NOW | RTLD_LOCAL);
         used_path = "libvulkan_freedreno.so";
+        if (!h) {
+            const char* e2 = dlerror();
+            if (e2) {
+                if (!res.turnip_error.empty()) res.turnip_error += " | ";
+                res.turnip_error += e2;
+            }
+        }
     }
     if (h) {
         auto* fn = reinterpret_cast<PfnGetInstanceProcAddr>(dlsym(h, "vk_icdGetInstanceProcAddr"));

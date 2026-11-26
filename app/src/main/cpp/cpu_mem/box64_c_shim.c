@@ -9,10 +9,12 @@
 #include "emu/x64emu_private.h"
 
 #include <android/log.h>
+#include <inttypes.h>
 #include <pthread.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -46,7 +48,12 @@ static pthread_once_t g_box64_ctx_once = PTHREAD_ONCE_INIT;
 static void mobiro_init_box64_context_once(void) {
     if (!my_context) {
         // Mirror upstream Box64 core.c::initialize() prerequisites since main.c.o is excluded
-        ftrace = stderr;
+        const char* trace_path = getenv("BOX64_TRACE_FILE");
+        if (trace_path && trace_path[0]) {
+            ftrace = fopen(trace_path, "w");
+        }
+        if (!ftrace) ftrace = stderr;
+        setvbuf(ftrace, NULL, _IONBF, 0);
         box64_pagesize = (uintptr_t)sysconf(_SC_PAGESIZE);
         if (!box64_pagesize) box64_pagesize = 4096;
         LoadEnvVariables();
@@ -55,6 +62,9 @@ static void mobiro_init_box64_context_once(void) {
         DetectHostCpuFeatures();
 #endif
         my_context = NewBox64Context(0);
+        fprintf(ftrace, "[mobiro] Box64 context ready (pagesize=%zu, dynarec=%d, ctx=%p, exit_bridge=0x%" PRIxPTR ")\n",
+                (size_t)box64_pagesize, BOX64ENV(dynarec), (void*)my_context,
+                my_context ? my_context->exit_bridge : (uintptr_t)0);
         __android_log_print(ANDROID_LOG_WARN, "Mobiro",
                             "Box64 context ready (pagesize=%zu, dynarec=%d, ctx=%p)",
                             (size_t)box64_pagesize, BOX64ENV(dynarec), (void*)my_context);
@@ -93,11 +103,19 @@ int mobiro_box64_call_fn(uintptr_t fn_va,
     emu->ip.q[0] = (uint64_t)fn_va;
     emu->segs_offs[_GS] = teb_va;
 
+    if (ftrace) {
+        fprintf(ftrace, "[mobiro] call_fn enter fn=0x%" PRIxPTR " rcx=0x%" PRIx64 " rdx=0x%" PRIx64 " rsp=0x%" PRIx64 " teb=0x%" PRIxPTR "\n",
+                fn_va, rcx, rdx, rsp, teb_va);
+    }
 #ifdef DYNAREC
     DynaRun(emu);
 #else
     Run(emu, 0);
 #endif
+    if (ftrace) {
+        fprintf(ftrace, "[mobiro] call_fn exit fn=0x%" PRIxPTR " rax=0x%" PRIx64 " rip=0x%" PRIx64 " quit=%d\n",
+                fn_va, emu->regs[_AX].q[0], emu->ip.q[0], emu->quit);
+    }
 
     if (out_rax) *out_rax = emu->regs[_AX].q[0];
     FreeX64Emu(&emu);
