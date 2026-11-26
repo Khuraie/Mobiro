@@ -1866,6 +1866,195 @@ void thunk_RtlGetVersion(x64emu_t* emu) {
     reg_rax(emu) = 0ULL; // STATUS_SUCCESS
 }
 
+// --- Win32 File Mapping (Named & Anonymous Shared Memory) ---
+struct FileMappingStore {
+    struct Entry {
+        uintptr_t base = 0;
+        size_t size = 0;
+    };
+    std::mutex mu;
+    uint64_t next_h = 0x600000ULL;
+    std::unordered_map<uint64_t, Entry> by_handle;
+    std::unordered_map<std::string, uint64_t> by_name;
+
+    static FileMappingStore& global() {
+        static FileMappingStore s;
+        return s;
+    }
+};
+
+uint64_t create_file_mapping_common(const std::string& name, uint64_t max_size) {
+    auto* b = Box64Bridge::instance();
+    if (!b) return 0ULL;
+    auto& st = FileMappingStore::global();
+    std::lock_guard<std::mutex> lk(st.mu);
+    if (!name.empty()) {
+        if (auto it = st.by_name.find(name); it != st.by_name.end()) {
+            return it->second;
+        }
+    }
+    const size_t sz = (max_size > 0 && max_size <= 64ULL * 1024 * 1024)
+        ? static_cast<size_t>(max_size) : 65536u;
+    const uintptr_t mem = b->heap().alloc(sz, true);
+    if (!mem) return 0ULL;
+    const uint64_t h = st.next_h++;
+    st.by_handle[h] = {mem, sz};
+    if (!name.empty()) st.by_name[name] = h;
+    return h;
+}
+
+void thunk_CreateFileMappingA(x64emu_t* emu) {
+    const uint64_t hi = reg_r9(emu) & 0xFFFFFFFFULL;
+    const uint64_t lo = stack_arg(emu, 0) & 0xFFFFFFFFULL;
+    const auto* nm = reinterpret_cast<const char*>(stack_arg(emu, 1));
+    reg_rax(emu) = create_file_mapping_common(nm ? std::string(nm) : std::string(), (hi << 32) | lo);
+}
+
+void thunk_CreateFileMappingW(x64emu_t* emu) {
+    const uint64_t hi = reg_r9(emu) & 0xFFFFFFFFULL;
+    const uint64_t lo = stack_arg(emu, 0) & 0xFFFFFFFFULL;
+    const auto* nm = reinterpret_cast<const uint16_t*>(stack_arg(emu, 1));
+    reg_rax(emu) = create_file_mapping_common(nm ? win32::utf16le_to_utf8(nm) : std::string(), (hi << 32) | lo);
+}
+
+uint64_t open_file_mapping_common(const std::string& name, x64emu_t* emu) {
+    auto& st = FileMappingStore::global();
+    std::lock_guard<std::mutex> lk(st.mu);
+    if (auto it = st.by_name.find(name); it != st.by_name.end()) {
+        return it->second;
+    }
+    if (auto* teb = current_teb(emu)) teb->last_error = 2u; // ERROR_FILE_NOT_FOUND
+    return 0ULL;
+}
+
+void thunk_OpenFileMappingA(x64emu_t* emu) {
+    const auto* nm = reinterpret_cast<const char*>(reg_r8(emu));
+    reg_rax(emu) = nm ? open_file_mapping_common(nm, emu) : 0ULL;
+}
+
+void thunk_OpenFileMappingW(x64emu_t* emu) {
+    const auto* nm = reinterpret_cast<const uint16_t*>(reg_r8(emu));
+    reg_rax(emu) = nm ? open_file_mapping_common(win32::utf16le_to_utf8(nm), emu) : 0ULL;
+}
+
+void thunk_MapViewOfFile(x64emu_t* emu) {
+    const uint64_t h = reg_rcx(emu);
+    const uint64_t off = ((reg_r8(emu) & 0xFFFFFFFFULL) << 32) | (reg_r9(emu) & 0xFFFFFFFFULL);
+    auto& st = FileMappingStore::global();
+    std::lock_guard<std::mutex> lk(st.mu);
+    auto it = st.by_handle.find(h);
+    if (it == st.by_handle.end() || off >= it->second.size) {
+        reg_rax(emu) = 0ULL;
+        return;
+    }
+    reg_rax(emu) = it->second.base + static_cast<size_t>(off);
+}
+
+void thunk_ReadWriteProcessMemory(x64emu_t* emu) {
+    auto* dst_or_src = reinterpret_cast<void*>(reg_rdx(emu));
+    auto* buf = reinterpret_cast<void*>(reg_r8(emu));
+    const size_t n = static_cast<size_t>(reg_r9(emu));
+    auto* out_n = reinterpret_cast<size_t*>(stack_arg(emu, 0));
+    if (!dst_or_src || !buf) { reg_rax(emu) = 0ULL; return; }
+    std::memcpy(buf, dst_or_src, n);
+    if (out_n) *out_n = n;
+    reg_rax(emu) = 1ULL;
+}
+
+void thunk_WriteProcessMemory(x64emu_t* emu) {
+    auto* dst = reinterpret_cast<void*>(reg_rdx(emu));
+    const auto* src = reinterpret_cast<const void*>(reg_r8(emu));
+    const size_t n = static_cast<size_t>(reg_r9(emu));
+    auto* out_n = reinterpret_cast<size_t*>(stack_arg(emu, 0));
+    if (!dst || !src) { reg_rax(emu) = 0ULL; return; }
+    std::memcpy(dst, src, n);
+    if (out_n) *out_n = n;
+    reg_rax(emu) = 1ULL;
+}
+
+void thunk_VirtualProtectEx(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    const uintptr_t addr = static_cast<uintptr_t>(reg_rdx(emu));
+    const size_t sz = static_cast<size_t>(reg_r8(emu));
+    const uint32_t new_prot = static_cast<uint32_t>(reg_r9(emu));
+    auto* old_prot = reinterpret_cast<uint32_t*>(stack_arg(emu, 0));
+    if (old_prot) *old_prot = 0x40u;
+    if (b && b->arena() && addr && sz) {
+        b->arena()->protect(addr, sz, mem::GuestArena::from_win32_protect(new_prot));
+    }
+    reg_rax(emu) = 1ULL;
+}
+
+void thunk_GetExitCodeProcessOrThread(x64emu_t* emu) {
+    if (auto* out = reinterpret_cast<uint32_t*>(reg_rdx(emu))) *out = 0u;
+    reg_rax(emu) = 1ULL;
+}
+
+void thunk_MulDiv(x64emu_t* emu) {
+    const int64_t a = static_cast<int32_t>(reg_rcx(emu));
+    const int64_t b = static_cast<int32_t>(reg_rdx(emu));
+    const int64_t c = static_cast<int32_t>(reg_r8(emu));
+    if (c == 0) { reg_rax(emu) = 0xFFFFFFFFULL; return; }
+    reg_rax(emu) = static_cast<uint64_t>(static_cast<int64_t>((a * b) / c));
+}
+
+void thunk_GetStartupInfoA(x64emu_t* emu) {
+    auto* si = reinterpret_cast<uint8_t*>(reg_rcx(emu));
+    if (si) {
+        std::memset(si, 0, 104);
+        const uint32_t cb = 104u;
+        std::memcpy(si, &cb, 4);
+    }
+    reg_rax(emu) = 0ULL;
+}
+
+void thunk_GetModuleHandleExA(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    const uint32_t flags = static_cast<uint32_t>(reg_rcx(emu));
+    const auto* name = reinterpret_cast<const char*>(reg_rdx(emu));
+    auto* out = reinterpret_cast<uint64_t*>(reg_r8(emu));
+    if (!b || !out) { reg_rax(emu) = 0ULL; return; }
+    if ((flags & 0x04u) != 0) { // GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+        *out = b->main_module_base();
+        reg_rax(emu) = 1ULL;
+        return;
+    }
+    if (!name) { *out = b->main_module_base(); reg_rax(emu) = 1ULL; return; }
+    const uint64_t h = b->modules().find_module(name);
+    if (h) { *out = h; reg_rax(emu) = 1ULL; return; }
+    if (b->has_dll_thunks(name)) { *out = b->modules().get_or_register_native(name); reg_rax(emu) = 1ULL; return; }
+    *out = 0ULL;
+    reg_rax(emu) = 0ULL;
+}
+
+void thunk_GetCurrentDirectoryA(x64emu_t* emu) {
+    const uint32_t cap = static_cast<uint32_t>(reg_rcx(emu));
+    auto* dst = reinterpret_cast<char*>(reg_rdx(emu));
+    static const char kDir[] = "C:\\Sekiro";
+    constexpr size_t kLen = sizeof(kDir) - 1;
+    if (!dst || cap <= kLen) { reg_rax(emu) = kLen + 1; return; }
+    std::memcpy(dst, kDir, kLen + 1);
+    reg_rax(emu) = kLen;
+}
+
+void thunk_ExpandEnvironmentStringsA(x64emu_t* emu) {
+    const auto* src = reinterpret_cast<const char*>(reg_rcx(emu));
+    auto* dst = reinterpret_cast<char*>(reg_rdx(emu));
+    const uint32_t cap = static_cast<uint32_t>(reg_r8(emu));
+    if (!src) { reg_rax(emu) = 0ULL; return; }
+    const size_t len = std::strlen(src) + 1;
+    if (dst && cap >= len) std::memcpy(dst, src, len);
+    reg_rax(emu) = len;
+}
+
+void thunk_MessageBoxLog(x64emu_t* emu) {
+#if defined(__ANDROID__)
+    const auto* txt = reinterpret_cast<const char*>(reg_rdx(emu));
+    __android_log_print(ANDROID_LOG_WARN, "Mobiro", "Guest MessageBoxA: %s", txt ? txt : "<null>");
+#endif
+    reg_rax(emu) = 1ULL; // IDOK
+}
+
 void thunk_XInputGetCapabilities(x64emu_t* emu) {
     const uint32_t user_idx = static_cast<uint32_t>(reg_rcx(emu));
     auto* caps = reinterpret_cast<uint8_t*>(reg_r8(emu));
@@ -2581,6 +2770,94 @@ void Box64Bridge::register_default_win32_thunks() {
     register_thunk("kernel32.dll", "GetLogicalProcessorInformationEx", &thunk_ReturnZero);
     register_thunk("xinput1_4.dll", "XInputGetCapabilities", &thunk_XInputGetCapabilities);
     register_thunk("xinput1_3.dll", "XInputGetCapabilities", &thunk_XInputGetCapabilities);
+
+    // M21: File Mapping, IPC/Pipes, Process/Memory, String & UI dynamic GetProcAddress thunks
+    register_thunk("kernel32.dll", "CreateFileMappingA", &thunk_CreateFileMappingA);
+    register_thunk("kernel32.dll", "CreateFileMappingW", &thunk_CreateFileMappingW);
+    register_thunk("kernel32.dll", "OpenFileMappingA", &thunk_OpenFileMappingA);
+    register_thunk("kernel32.dll", "OpenFileMappingW", &thunk_OpenFileMappingW);
+    register_thunk("kernel32.dll", "MapViewOfFile", &thunk_MapViewOfFile);
+    register_thunk("kernel32.dll", "MapViewOfFileEx", &thunk_MapViewOfFile);
+    register_thunk("kernel32.dll", "UnmapViewOfFile", &thunk_ReturnTrue);
+    register_thunk("kernel32.dll", "FlushViewOfFile", &thunk_ReturnTrue);
+    register_thunk("kernel32.dll", "OpenEventW", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "OpenMutexA", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "OpenMutexW", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "OpenSemaphoreA", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "OpenSemaphoreW", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "PulseEvent", &thunk_SetEvent);
+    register_thunk("kernel32.dll", "CreateNamedPipeA", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "CreateNamedPipeW", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "ConnectNamedPipe", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "DisconnectNamedPipe", &thunk_ReturnTrue);
+    register_thunk("kernel32.dll", "WaitNamedPipeA", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "WaitNamedPipeW", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "TransactNamedPipe", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "SetNamedPipeHandleState", &thunk_ReturnTrue);
+    register_thunk("kernel32.dll", "CreatePipe", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "CreateProcessW", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "OpenThread", &thunk_GetCurrentThread);
+    register_thunk("kernel32.dll", "GetExitCodeProcess", &thunk_GetExitCodeProcessOrThread);
+    register_thunk("kernel32.dll", "GetExitCodeThread", &thunk_GetExitCodeProcessOrThread);
+    register_thunk("kernel32.dll", "GetProcessId", &thunk_GetCurrentProcessId);
+    register_thunk("kernel32.dll", "GetThreadId", &thunk_GetCurrentThreadId);
+    register_thunk("kernel32.dll", "SwitchToThread", &thunk_ReturnTrue);
+    register_thunk("kernel32.dll", "ExitThread", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "TerminateThread", &thunk_ReturnTrue);
+    register_thunk("kernel32.dll", "ReadProcessMemory", &thunk_ReadWriteProcessMemory);
+    register_thunk("kernel32.dll", "WriteProcessMemory", &thunk_WriteProcessMemory);
+    register_thunk("kernel32.dll", "VirtualProtectEx", &thunk_VirtualProtectEx);
+    register_thunk("kernel32.dll", "GetModuleHandleExA", &thunk_GetModuleHandleExA);
+    register_thunk("kernel32.dll", "FreeLibraryAndExitThread", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "GetCommandLineA", &thunk_GetCommandLineA);
+    register_thunk("kernel32.dll", "GetStartupInfoA", &thunk_GetStartupInfoA);
+    register_thunk("kernel32.dll", "GetCurrentDirectoryA", &thunk_GetCurrentDirectoryA);
+    register_thunk("kernel32.dll", "SetCurrentDirectoryA", &thunk_ReturnTrue);
+    register_thunk("kernel32.dll", "GetWindowsDirectoryW", &thunk_GetTempPathW);
+    register_thunk("kernel32.dll", "GetFileAttributesA", &thunk_GetFileAttributesA);
+    register_thunk("kernel32.dll", "SetFileAttributesA", &thunk_ReturnTrue);
+    register_thunk("kernel32.dll", "SetFileAttributesW", &thunk_ReturnTrue);
+    register_thunk("kernel32.dll", "DeleteFileA", &thunk_ReturnTrue);
+    register_thunk("kernel32.dll", "MoveFileA", &thunk_ReturnTrue);
+    register_thunk("kernel32.dll", "MoveFileExA", &thunk_ReturnTrue);
+    register_thunk("kernel32.dll", "CopyFileA", &thunk_ReturnTrue);
+    register_thunk("kernel32.dll", "CopyFileW", &thunk_ReturnTrue);
+    register_thunk("kernel32.dll", "CreateDirectoryA", &thunk_ReturnTrue);
+    register_thunk("kernel32.dll", "RemoveDirectoryA", &thunk_ReturnTrue);
+    register_thunk("kernel32.dll", "ExpandEnvironmentStringsA", &thunk_ExpandEnvironmentStringsA);
+    register_thunk("kernel32.dll", "SetErrorMode", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "MulDiv", &thunk_MulDiv);
+    register_thunk("kernel32.dll", "lstrlenA", &thunk_strlen);
+    register_thunk("kernel32.dll", "lstrlenW", &thunk_wcslen);
+    register_thunk("kernel32.dll", "lstrcpyA", &thunk_crt_strcpy);
+    register_thunk("kernel32.dll", "lstrcpyW", &thunk_crt_wcscpy);
+    register_thunk("kernel32.dll", "lstrcpynA", &thunk_crt_strncpy);
+    register_thunk("kernel32.dll", "lstrcpynW", &thunk_crt_wcsncpy);
+    register_thunk("kernel32.dll", "lstrcatA", &thunk_crt_strcat);
+    register_thunk("kernel32.dll", "lstrcatW", &thunk_crt_wcscat);
+    register_thunk("kernel32.dll", "lstrcmpA", &thunk_strcmp);
+    register_thunk("kernel32.dll", "lstrcmpW", &thunk_crt_wcscmp);
+    register_thunk("kernel32.dll", "lstrcmpiA", &thunk_crt_stricmp);
+    register_thunk("kernel32.dll", "lstrcmpiW", &thunk_crt_wcsicmp);
+    register_thunk("user32.dll", "MessageBoxA", &thunk_MessageBoxLog);
+    register_thunk("user32.dll", "MessageBoxW", &thunk_MessageBoxLog);
+    register_thunk("user32.dll", "wsprintfA", &thunk_crt_sprintf);
+    register_thunk("user32.dll", "wsprintfW", &thunk_crt_swprintf);
+    register_thunk("user32.dll", "FindWindowA", &thunk_ReturnZero);
+    register_thunk("user32.dll", "FindWindowW", &thunk_ReturnZero);
+    register_thunk("user32.dll", "SendMessageA", &thunk_ReturnZero);
+    register_thunk("user32.dll", "SendMessageW", &thunk_ReturnZero);
+    register_thunk("user32.dll", "PostMessageA", &thunk_ReturnTrue);
+    register_thunk("user32.dll", "PostMessageW", &thunk_ReturnTrue);
+    register_thunk("user32.dll", "GetDesktopWindow", &thunk_CreateWindowEx);
+    register_thunk("user32.dll", "GetForegroundWindow", &thunk_CreateWindowEx);
+    register_thunk("user32.dll", "IsWindow", &thunk_ReturnTrue);
+    register_thunk("user32.dll", "IsWindowVisible", &thunk_ReturnTrue);
+    register_thunk("advapi32.dll", "RegCreateKeyExA", &thunk_RegNotFound);
+    register_thunk("advapi32.dll", "RegCreateKeyExW", &thunk_RegNotFound);
+    register_thunk("advapi32.dll", "RegSetValueExA", &thunk_ReturnZero);
+    register_thunk("advapi32.dll", "RegSetValueExW", &thunk_ReturnZero);
+    register_thunk("shell32.dll", "ShellExecuteW", &thunk_ReturnZero);
 
     register_sekiro_compat_thunks(*this);
 }
