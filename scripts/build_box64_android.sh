@@ -34,9 +34,9 @@ cmake -S "$BOX64_SRC" -B "$BUILD_DIR" -G Ninja \
 
 cmake --build "$BUILD_DIR" --parallel
 
-mkdir -p "$OUT_DIR/include/emu" "$OUT_DIR/lib"
+mkdir -p "$OUT_DIR/include" "$OUT_DIR/lib"
+(cd "$BOX64_SRC/src" && find . -type f -name "*.h" -exec cp --parents -f {} "$OUT_DIR/include/" \;)
 cp -a "$BOX64_SRC/src/include/." "$OUT_DIR/include/"
-cp -a "$BOX64_SRC/src/emu/"*.h "$OUT_DIR/include/emu/"
 if [ -f "$BUILD_DIR/box64" ]; then
   cp -f "$BUILD_DIR/box64" "$OUT_DIR/lib/box64_cli"
 fi
