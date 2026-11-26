@@ -1,5 +1,7 @@
 #include "cpu_mem/box64_bridge.hpp"
 #include "cpu_mem/guest_arena.hpp"
+#include "cpu_mem/pe_loader.hpp"
+#include "cpu_mem/win64_teb.hpp"
 #include "gfx/dxvk_config_gen.hpp"
 #include "input/input_router.hpp"
 #include "sched/thread_balancer.hpp"
@@ -29,48 +31,99 @@ void wr64(std::vector<uint8_t>& buf, size_t off, uint64_t v) {
     for (int i = 0; i < 8; ++i) buf[off + i] = static_cast<uint8_t>((v >> (i * 8)) & 0xFF);
 }
 
-// Constructs a clean synthetic minimal PE32+ binary (x86_64) with one section importing d3d11.dll
+// Constructs a synthetic PE32+ (x86_64) image with:
+//   Section 0 (.rdata, RVA 0x1000): Import Directory (d3d11.dll + kernel32.dll) + IAT
+//   Section 1 (.data,  RVA 0x2000): 64-bit pointer requiring DIR64 base relocation
+//   Section 2 (.reloc, RVA 0x3000): Base relocation block patching .data+0x00
 void write_synthetic_pe64(const fs::path& path, bool include_d3d11_import) {
-    std::vector<uint8_t> img(0x1000, 0);
-    // DOS header
+    std::vector<uint8_t> img(0x1400, 0);
     img[0] = 'M'; img[1] = 'Z';
     const uint32_t pe_off = 0x80;
     wr32(img, 0x3C, pe_off);
 
-    // PE signature
     img[pe_off] = 'P'; img[pe_off + 1] = 'E';
     const size_t coff = pe_off + 4;
     wr16(img, coff + 0, 0x8664); // AMD64
-    wr16(img, coff + 2, 1);      // NumberOfSections = 1
+    wr16(img, coff + 2, 3);      // 3 sections
     const uint16_t opt_size = 0xF0;
     wr16(img, coff + 16, opt_size);
 
-    // Optional Header (PE32+)
     const size_t opt = coff + 20;
-    wr16(img, opt + 0, 0x020B);                   // PE32+ magic
-    wr32(img, opt + 16, 0x1000);                  // AddressOfEntryPoint
-    wr64(img, opt + 24, 0x0000000140000000ULL);   // ImageBase
-    wr32(img, opt + 56, 0x4000);                  // SizeOfImage
-    wr32(img, opt + 108, 16);                     // NumberOfRvaAndSizes
-    if (include_d3d11_import) {
-        wr32(img, opt + 120, 0x1000);             // DataDirectory[1] Import RVA
-        wr32(img, opt + 124, 40);                 // Import Size
-    }
-
-    // Section 0 (.rdata): VA=0x1000, RawPtr=0x400, RawSize=0x400
-    const size_t sec = opt + opt_size;
-    std::memcpy(&img[sec], ".rdata", 6);
-    wr32(img, sec + 8, 0x400);   // VirtualSize
-    wr32(img, sec + 12, 0x1000); // VirtualAddress
-    wr32(img, sec + 16, 0x400);  // SizeOfRawData
-    wr32(img, sec + 20, 0x400);  // PointerToRawData
+    constexpr uint64_t kPrefBase = 0x0000000140000000ULL;
+    wr16(img, opt + 0, 0x020B);      // PE32+
+    wr32(img, opt + 16, 0x1000);     // EntryPoint RVA
+    wr64(img, opt + 24, kPrefBase);  // ImageBase
+    wr32(img, opt + 56, 0x4000);     // SizeOfImage
+    wr32(img, opt + 60, 0x400);      // SizeOfHeaders
+    wr32(img, opt + 108, 16);        // NumberOfRvaAndSizes
 
     if (include_d3d11_import) {
-        // Import descriptor at file offset 0x400 (RVA 0x1000)
-        wr32(img, 0x400 + 12, 0x1040); // Name RVA -> file offset 0x440
-        wr32(img, 0x400 + 16, 0x1080); // FirstThunk non-zero
-        std::memcpy(&img[0x440], "d3d11.dll", 10);
+        wr32(img, opt + 112 + 1 * 8, 0x1000); // DataDirectory[1] Import RVA
+        wr32(img, opt + 112 + 1 * 8 + 4, 60); // Import Size
     }
+    wr32(img, opt + 112 + 5 * 8, 0x3000);     // DataDirectory[5] BaseReloc RVA
+    wr32(img, opt + 112 + 5 * 8 + 4, 12);     // BaseReloc Size
+
+    const size_t sec0 = opt + opt_size;
+    // .rdata (VA 0x1000, Raw 0x400, Size 0x400, R)
+    std::memcpy(&img[sec0], ".rdata", 6);
+    wr32(img, sec0 + 8, 0x400);
+    wr32(img, sec0 + 12, 0x1000);
+    wr32(img, sec0 + 16, 0x400);
+    wr32(img, sec0 + 20, 0x400);
+    wr32(img, sec0 + 36, 0x40000040u); // READ | INITIALIZED_DATA
+
+    // .data (VA 0x2000, Raw 0x800, Size 0x400, RW)
+    const size_t sec1 = sec0 + 40;
+    std::memcpy(&img[sec1], ".data", 5);
+    wr32(img, sec1 + 8, 0x400);
+    wr32(img, sec1 + 12, 0x2000);
+    wr32(img, sec1 + 16, 0x400);
+    wr32(img, sec1 + 20, 0x800);
+    wr32(img, sec1 + 36, 0xC0000040u); // READ | WRITE
+
+    // .reloc (VA 0x3000, Raw 0xC00, Size 0x400, R)
+    const size_t sec2 = sec1 + 40;
+    std::memcpy(&img[sec2], ".reloc", 6);
+    wr32(img, sec2 + 8, 0x400);
+    wr32(img, sec2 + 12, 0x3000);
+    wr32(img, sec2 + 16, 0x400);
+    wr32(img, sec2 + 20, 0xC00);
+    wr32(img, sec2 + 36, 0x42000040u); // READ | DISCARDABLE
+
+    if (include_d3d11_import) {
+        // Descriptor 0: d3d11.dll -> D3D11CreateDevice
+        wr32(img, 0x400 + 0,  0x1100); // OriginalFirstThunk
+        wr32(img, 0x400 + 12, 0x1080); // Name RVA
+        wr32(img, 0x400 + 16, 0x1140); // FirstThunk (IAT)
+
+        // Descriptor 1: kernel32.dll -> VirtualAlloc + UnknownFunc
+        wr32(img, 0x400 + 20 + 0,  0x1110);
+        wr32(img, 0x400 + 20 + 12, 0x10A0);
+        wr32(img, 0x400 + 20 + 16, 0x1150);
+
+        std::memcpy(&img[0x480], "d3d11.dll", 10);
+        std::memcpy(&img[0x4A0], "kernel32.dll", 13);
+
+        // Thunk lookup tables
+        wr64(img, 0x500, 0x1200); // d3d11[0] -> IBN at RVA 0x1200
+        wr64(img, 0x510, 0x1220); // k32[0]   -> IBN at RVA 0x1220
+        wr64(img, 0x518, 0x1240); // k32[1]   -> IBN at RVA 0x1240 (unresolved)
+
+        // Import-By-Name records (2-byte hint + ASCII name)
+        std::memcpy(&img[0x600 + 2], "D3D11CreateDevice", 18);
+        std::memcpy(&img[0x620 + 2], "VirtualAlloc", 13);
+        std::memcpy(&img[0x640 + 2], "UnimplementedWin32Api", 22);
+    }
+
+    // .data+0x00 holds a 64-bit pointer to kPrefBase + 0x2080
+    wr64(img, 0x800, kPrefBase + 0x2080);
+
+    // .reloc block: PageRVA=0x2000, BlockSize=12, Entry0=(DIR64<<12 | 0x000), Entry1=0
+    wr32(img, 0xC00 + 0, 0x2000);
+    wr32(img, 0xC00 + 4, 12);
+    wr16(img, 0xC00 + 8, static_cast<uint16_t>((10u << 12) | 0x000u));
+    wr16(img, 0xC00 + 10, 0);
 
     std::ofstream f(path, std::ios::binary | std::ios::trunc);
     f.write(reinterpret_cast<const char*>(img.data()), static_cast<std::streamsize>(img.size()));
@@ -86,7 +139,7 @@ void test_byof_validator_and_vfs() {
         std::ofstream bhd(tmp / ("Data" + std::to_string(i) + ".bhd"), std::ios::binary);
         bhd << "ENCRYPTED_HEADER_STUB";
         std::ofstream bdt(tmp / ("Data" + std::to_string(i) + ".bdt"), std::ios::binary);
-        bdt.write("BDF4\0\0\0\0\0\0\0\0\0\0\0\0", 16);
+        bdt.write("BDF4\0\0\0\0ABCDEFGH", 16);
     }
 
     mobiro::validator::VfsMapper vfs;
@@ -96,7 +149,6 @@ void test_byof_validator_and_vfs() {
     assert(rep.pe.preferred_image_base == 0x0000000140000000ULL);
     assert(!rep.pe.build_fingerprint.empty());
 
-    // Case-insensitive Windows path resolution
     std::string host_path;
     assert(vfs.resolve("C:\\DATA3.BDT", host_path));
     assert(vfs.resolve("SEKIRO.EXE", host_path));
@@ -112,53 +164,132 @@ void test_byof_validator_and_vfs() {
     fs::remove_all(tmp);
 }
 
-void test_guest_arena_and_thunks() {
-    mobiro::mem::GuestArena arena;
-    assert(arena.reserve(0x0000000100000000ULL, 1024ULL * 1024 * 1024));
+void test_pe_loader_teb_and_win32_thunks() {
+    const fs::path tmp = fs::temp_directory_path() / "mobiro_test_pe_load";
+    fs::remove_all(tmp);
+    fs::create_directories(tmp);
+    write_synthetic_pe64(tmp / "Sekiro.exe", true);
+    {
+        std::ofstream bdt(tmp / "Data0.bdt", std::ios::binary);
+        bdt.write("BDF4\0\0\0\0SEKIRO!!", 16);
+    }
 
     mobiro::validator::VfsMapper vfs;
+    assert(vfs.index_root(tmp.string()));
+
+    mobiro::mem::GuestArena arena;
+    assert(arena.reserve(0x0000000100000000ULL, 128ULL * 1024 * 1024));
+
     mobiro::cpu::Box64Bridge bridge;
     assert(bridge.initialize(&arena, &vfs));
 
-    // Verify IAT stub creation
-    uintptr_t stub = bridge.resolve_import("KERNEL32.DLL", "VirtualAlloc");
-    assert(stub != 0);
+    // 1. Load PE64 with forced relocation so DIR64 relocation path is exercised
+    std::string exe_path;
+    assert(vfs.resolve("sekiro.exe", exe_path));
+    auto loaded = mobiro::cpu::PeLoader::load_pe64(exe_path, arena, bridge, /*force_relocate=*/true);
+    assert(loaded.ok);
+    assert(loaded.relocations_applied == 1);
+    assert(loaded.imports_resolved == 2); // D3D11CreateDevice + VirtualAlloc
+    assert(loaded.unresolved_imports.size() == 1);
+    assert(loaded.unresolved_imports[0] == "kernel32.dll!UnimplementedWin32Api");
 
-    // Invoke VirtualAlloc thunk (MEM_COMMIT | MEM_RESERVE, 128 KiB, PAGE_READWRITE)
+    // Verify DIR64 relocated pointer inside mapped .data+0x00
+    uint64_t relocated_ptr = 0;
+    std::memcpy(&relocated_ptr, reinterpret_cast<const void*>(loaded.mapped_base + 0x2000), 8);
+    assert(relocated_ptr == loaded.mapped_base + 0x2080);
+
+    // Verify IAT slot for d3d11!D3D11CreateDevice was patched with a valid NativeBridgeStub
+    uint64_t iat_d3d11 = 0;
+    std::memcpy(&iat_d3d11, reinterpret_cast<const void*>(loaded.mapped_base + 0x1140), 8);
+    assert(iat_d3d11 != 0);
+    auto* stub = reinterpret_cast<const mobiro::cpu::NativeBridgeStub*>(iat_d3d11);
+    assert(stub->trap_cc == 0xCC && stub->magic[0] == 'M' && stub->magic[1] == 'B');
+
+    // 2. Initialize Win64 TEB/PEB and test TLS + GetModuleHandleW + QPC thunks
+    bridge.set_main_module_base(loaded.mapped_base);
+    mobiro::cpu::Win64ThreadEnv tenv;
+    assert(tenv.init_main_thread(arena, loaded.mapped_base, 8, 4242, 7777));
+    bridge.set_main_teb(tenv.teb);
+
+    assert(tenv.teb->self_ptr == reinterpret_cast<uintptr_t>(tenv.teb));
+    assert(tenv.teb->peb_ptr == reinterpret_cast<uintptr_t>(tenv.peb));
+    assert(tenv.peb->image_base_address == loaded.mapped_base);
+
     x64emu_t emu{};
-    emu.rcx = 0;
-    emu.rdx = 128 * 1024;
-    emu.r8 = 0x3000;
-    emu.r9 = 0x04;
-    assert(bridge.invoke_thunk("kernel32.dll", "VirtualAlloc", &emu));
-    assert(emu.rax != 0);
-    assert(arena.committed_bytes() >= 128 * 1024);
+    emu.gs_base = reinterpret_cast<uint64_t>(tenv.teb);
 
-    // Invoke VirtualFree thunk
-    x64emu_t free_emu{};
-    free_emu.rcx = emu.rax;
-    free_emu.rdx = 128 * 1024;
-    assert(bridge.invoke_thunk("kernel32.dll", "VirtualFree", &free_emu));
-    assert(free_emu.rax == 1);
-    assert(arena.committed_bytes() == 0);
+    assert(bridge.invoke_thunk("kernel32.dll", "GetModuleHandleW", &emu));
+    assert(emu.rax == loaded.mapped_base);
 
-    // Invoke XInputGetState thunk after updating InputRouter
+    assert(bridge.invoke_thunk("kernel32.dll", "TlsAlloc", &emu));
+    const uint64_t tls_slot = emu.rax;
+    assert(tls_slot == 0);
+
+    emu.rcx = tls_slot;
+    emu.rdx = 0xDEADBEEFCAFEBABEULL;
+    assert(bridge.invoke_thunk("kernel32.dll", "TlsSetValue", &emu));
+    assert(emu.rax == 1);
+
+    emu.rcx = tls_slot;
+    assert(bridge.invoke_thunk("kernel32.dll", "TlsGetValue", &emu));
+    assert(emu.rax == 0xDEADBEEFCAFEBABEULL);
+
+    int64_t qpc_freq = 0, qpc_val = 0;
+    emu.rcx = reinterpret_cast<uint64_t>(&qpc_freq);
+    assert(bridge.invoke_thunk("kernel32.dll", "QueryPerformanceFrequency", &emu));
+    assert(emu.rax == 1 && qpc_freq == 10'000'000LL);
+    emu.rcx = reinterpret_cast<uint64_t>(&qpc_val);
+    assert(bridge.invoke_thunk("kernel32.dll", "QueryPerformanceCounter", &emu));
+    assert(emu.rax == 1 && qpc_val > 0);
+
+    // 3. Test VFS-backed Win32 CreateFileW + GetFileSizeEx + ReadFile (OVERLAPPED) + CloseHandle
+    const uint16_t wpath[] = {'C', ':', '\\', 'D', 'a', 't', 'a', '0', '.', 'b', 'd', 't', 0};
+    emu.rcx = reinterpret_cast<uint64_t>(wpath);
+    assert(bridge.invoke_thunk("kernel32.dll", "CreateFileW", &emu));
+    const uint64_t hfile = emu.rax;
+    assert(hfile != mobiro::win32::FileHandleTable::kInvalidHandle);
+
+    int64_t fsize = 0;
+    emu.rcx = hfile;
+    emu.rdx = reinterpret_cast<uint64_t>(&fsize);
+    assert(bridge.invoke_thunk("kernel32.dll", "GetFileSizeEx", &emu));
+    assert(emu.rax == 1 && fsize == 16);
+
+    char read_buf[9]{};
+    uint32_t bytes_read = 0;
+    mobiro::win32::Win64Overlapped ov{};
+    ov.offset = 8; // Read "SEKIRO!!" starting at offset 8
+    uint64_t fake_stack[8]{};
+    fake_stack[5] = reinterpret_cast<uint64_t>(&ov); // Win64 5th arg at [RSP+0x28]
+    emu.rcx = hfile;
+    emu.rdx = reinterpret_cast<uint64_t>(read_buf);
+    emu.r8  = 8;
+    emu.r9  = reinterpret_cast<uint64_t>(&bytes_read);
+    emu.rsp = reinterpret_cast<uint64_t>(fake_stack);
+    assert(bridge.invoke_thunk("kernel32.dll", "ReadFile", &emu));
+    assert(emu.rax == 1 && bytes_read == 8 && std::memcmp(read_buf, "SEKIRO!!", 8) == 0);
+
+    emu.rcx = hfile;
+    assert(bridge.invoke_thunk("kernel32.dll", "CloseHandle", &emu));
+    assert(emu.rax == 1);
+
+    // 4. Test XInputGetState thunk via lock-free InputRouter
     auto& router = mobiro::input::InputRouter::global();
-    router.set_button(mobiro::input::kLeftShoulder, true); // Deflect
-    router.set_left_stick(0.05f, 0.05f, 0.12f);            // Inside deadzone -> (0,0)
-    router.set_right_stick(1.0f, 0.0f, 0.10f);             // Full right -> (32767, 0)
+    router.set_button(mobiro::input::kLeftShoulder, true);
+    router.set_left_stick(0.05f, 0.05f, 0.12f);
+    router.set_right_stick(1.0f, 0.0f, 0.10f);
 
     mobiro::input::XInputState xi{};
-    x64emu_t xi_emu{};
-    xi_emu.rcx = 0;
-    xi_emu.rdx = reinterpret_cast<uint64_t>(&xi);
-    assert(bridge.invoke_thunk("xinput1_4.dll", "XInputGetState", &xi_emu));
-    assert(xi_emu.rax == 0);
+    emu.rcx = 0;
+    emu.rdx = reinterpret_cast<uint64_t>(&xi);
+    assert(bridge.invoke_thunk("xinput1_4.dll", "XInputGetState", &emu));
+    assert(emu.rax == 0);
     assert((xi.Gamepad.wButtons & mobiro::input::kLeftShoulder) != 0);
     assert(xi.Gamepad.sThumbLX == 0 && xi.Gamepad.sThumbLY == 0);
     assert(xi.Gamepad.sThumbRX == 32767 && xi.Gamepad.sThumbRY == 0);
 
     bridge.shutdown();
+    fs::remove_all(tmp);
 }
 
 void test_dxvk_config_and_topology() {
@@ -175,7 +306,6 @@ void test_dxvk_config_and_topology() {
     assert(conf.find("d3d11.maxFrameLatency = 1") != std::string::npos);
     assert(conf.find("d3d11.invariantPosition = True") != std::string::npos);
 
-    // Simulate Snapdragon 8 Gen 3 topology: 1 Prime + 5 Perf + 2 Eff
     auto topo = mobiro::sched::CpuTopology::classify({
         {0, 2265600}, {1, 2265600},
         {2, 2956800}, {3, 2956800}, {4, 3148800}, {5, 3148800}, {6, 3148800},
@@ -190,7 +320,7 @@ void test_dxvk_config_and_topology() {
 
 int main() {
     test_byof_validator_and_vfs();
-    test_guest_arena_and_thunks();
+    test_pe_loader_teb_and_win32_thunks();
     test_dxvk_config_and_topology();
     std::cout << "All Mobiro core unit tests passed.\n";
     return 0;

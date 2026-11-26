@@ -1,5 +1,7 @@
 #include "cpu_mem/box64_bridge.hpp"
 #include "cpu_mem/guest_arena.hpp"
+#include "cpu_mem/pe_loader.hpp"
+#include "cpu_mem/win64_teb.hpp"
 #include "gfx/dxvk_config_gen.hpp"
 #include "gfx/turnip_loader.hpp"
 #include "input/input_router.hpp"
@@ -25,6 +27,8 @@ struct MobiroRuntimeState {
     mobiro::validator::VfsMapper vfs;
     mobiro::mem::GuestArena arena;
     mobiro::cpu::Box64Bridge box64;
+    mobiro::cpu::LoadedPeImage pe_image;
+    mobiro::cpu::Win64ThreadEnv main_thread_env;
     mobiro::gfx::VulkanDriverHandle vk_driver;
     mobiro::sched::ThreadBalancer balancer;
     std::atomic<int> target_fps{60};
@@ -143,12 +147,33 @@ Java_com_mobiro_runtime_MainActivity_nativeConfigureAndValidate(
         return env->NewStringUTF("Failed to initialize Box64 native thunk bridge.");
     }
 
+    // 6. Map sekiro.exe PE64 sections, apply relocations, patch IAT, and initialize Win64 TEB/PEB
+    std::string exe_host_path;
+    if (!g_rt.vfs.resolve("sekiro.exe", exe_host_path)) {
+        return env->NewStringUTF("Unable to resolve sekiro.exe via VFS.");
+    }
+    g_rt.pe_image = mobiro::cpu::PeLoader::load_pe64(exe_host_path, g_rt.arena, g_rt.box64);
+    if (!g_rt.pe_image.ok) {
+        return env->NewStringUTF(g_rt.pe_image.error.c_str());
+    }
+    g_rt.box64.set_main_module_base(g_rt.pe_image.mapped_base);
+
+    const uint32_t cpus = static_cast<uint32_t>(sysconf(_SC_NPROCESSORS_CONF));
+    if (!g_rt.main_thread_env.init_main_thread(
+            g_rt.arena, g_rt.pe_image.mapped_base, cpus,
+            static_cast<uint64_t>(getpid()), static_cast<uint64_t>(gettid()))) {
+        return env->NewStringUTF("Failed to initialize Win64 TEB/PEB.");
+    }
+    g_rt.box64.set_main_teb(g_rt.main_thread_env.teb);
+
     g_rt.configured.store(true, std::memory_order_release);
     __android_log_print(ANDROID_LOG_INFO, kLogTag,
-                        "Mobiro BYOF validated: fingerprint=%s pairs=%d imageBase=0x%llx",
-                        report.pe.build_fingerprint.c_str(),
-                        report.verified_archive_pairs,
-                        static_cast<unsigned long long>(report.pe.preferred_image_base));
+                        "Mobiro mapped PE64: base=0x%llx ep=0x%llx relocs=%zu iat_ok=%zu iat_missing=%zu",
+                        static_cast<unsigned long long>(g_rt.pe_image.mapped_base),
+                        static_cast<unsigned long long>(g_rt.pe_image.entry_point),
+                        g_rt.pe_image.relocations_applied,
+                        g_rt.pe_image.imports_resolved,
+                        g_rt.pe_image.unresolved_imports.size());
     return env->NewStringUTF("");
 }
 

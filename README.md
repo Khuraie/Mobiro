@@ -62,10 +62,13 @@ gradle :app:assembleDebug
 
 ---
 
-## Roadmap
+## Roadmap & Progress
+
+See [PROGRESS.md](PROGRESS.md) for the live engineering log of every verified increment.
 
 - [x] **M0 — Clean-Room Container Foundation:** Android `GameActivity` NDK shell, PE32+ & `Data0`–`Data5` `BDF4` BYOF validator, case-insensitive VFS, low-47-bit `mmap` guest arena, IAT thunk bridge, Turnip ICD loader, dynamic `dxvk.conf` UMA generator, lock-free XInput router, ADPF thread balancer, CI + unit tests.
-- [ ] **M1 — Embedded Box64 + PE64 Loader Bring-Up:** Wire upstream Box64 static library, PE64 section mapper/relocator, Win64 `GS`/TEB segment register binding, and SEH unwind table registration.
+- [x] **M1-a — PE64 Loader, Relocations, TEB/PEB & Win32 VFS/Sync Core:** Section mapper, `DIR64`/`HIGHLOW` relocator, IAT native stub patcher, canonical Win64 `TEB`/`PEB` (`GS:[0x30]`/`GS:[0x60]`), VFS-backed `CreateFileW`/`ReadFile` (`OVERLAPPED`), `SRWLock`, QPC, and TLS thunks.
+- [ ] **M1-b — Embedded Box64 Dynarec Bring-Up:** Wire upstream Box64 `arm64-v8a` static build, `GS`/TEB register binding, SEH `.pdata` registration, and guest entry-point dispatch.
 - [ ] **M2 — Native AArch64 DXVK + Turnip Bring-Up:** Cross-compile DXVK + Mesa Turnip for `arm64-v8a`, wire `D3D11CreateDevice` / `CreateDXGIFactory1` thunks to `ANativeWindow` + `SwappyVk`.
 - [ ] **M3 — Win32 Sync, VFS File I/O & Audio:** Complete `CreateFileW`/async `.bdt` streaming, `SRWLock`/`WaitOnAddress` (`futex`), and `XAudio2` → `AAudio` low-latency bridge.
 - [ ] **M4 — In-Swapchain Touch HUD & Frame-Pacing Tuning:** Render virtual controls inside the Vulkan swapchain pass and tune GPL pipeline pre-warming for stable 30/60 FPS combat pacing.

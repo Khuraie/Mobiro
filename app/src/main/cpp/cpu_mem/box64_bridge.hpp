@@ -1,6 +1,8 @@
 #pragma once
 
 #include "guest_arena.hpp"
+#include "win32_file_sync.hpp"
+#include "win64_teb.hpp"
 #include "../validator/vfs_mapper.hpp"
 
 #include <cstdint>
@@ -55,12 +57,27 @@ public:
     static Box64Bridge* instance() { return g_instance_; }
     mem::GuestArena* arena() const { return arena_; }
     const validator::VfsMapper* vfs() const { return vfs_; }
+    win32::FileHandleTable& files() { return files_; }
+    win32::SrwLockTable& srw_locks() { return srw_locks_; }
+    void set_main_module_base(uintptr_t base) { main_module_base_ = base; }
+    uintptr_t main_module_base() const { return main_module_base_; }
+    void set_main_teb(Win64Teb* teb) { main_teb_ = teb; }
+    Win64Teb* main_teb() const { return main_teb_; }
+    uint32_t alloc_tls_slot() {
+        uint32_t idx = next_tls_slot_++;
+        return (idx < 64) ? idx : 0xFFFFFFFFu;
+    }
 
 private:
     void register_default_win32_thunks();
 
     mem::GuestArena* arena_ = nullptr;
     const validator::VfsMapper* vfs_ = nullptr;
+    win32::FileHandleTable files_;
+    win32::SrwLockTable srw_locks_;
+    uintptr_t main_module_base_ = 0;
+    Win64Teb* main_teb_ = nullptr;
+    uint32_t next_tls_slot_ = 0;
     NativeBridgeStub* stub_pool_ = nullptr;
     size_t stub_count_ = 0;
     static constexpr size_t kMaxStubs = 4096;
