@@ -45,6 +45,7 @@ inline std::string render_dxvk_conf(const DxvkProfileParams& p) {
         << "dxvk.numCompilerThreads = " << threads << "\n"
         << "dxvk.maxChunkSize = " << budget.max_chunk_size_mb << "\n"
         << "dxvk.enableMemoryDefrag = True\n"
+        << "dxvk.trackPipelineLifetime = True\n"
         << "dxgi.maxDeviceMemory = " << budget.max_device_memory_mb << "\n"
         << "dxgi.maxSharedMemory = " << budget.max_shared_memory_mb << "\n"
         << "d3d11.invariantPosition = True\n"

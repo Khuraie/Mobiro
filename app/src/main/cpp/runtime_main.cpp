@@ -187,8 +187,22 @@ Java_com_mobiro_runtime_MainActivity_nativeConfigureAndValidate(
     setenv("DXVK_WSI_DRIVER", "Android", 1);
     setenv("DXVK_CONFIG_FILE", dxvk_conf_path.c_str(), 1);
     setenv("DXVK_STATE_CACHE_PATH", (build_cache + "/dxvk").c_str(), 1);
+    setenv("DXVK_ASYNC", "1", 0);
     setenv("MESA_SHADER_CACHE_DIR", (build_cache + "/turnip").c_str(), 1);
     setenv("MESA_SHADER_CACHE_MAX_SIZE", "1G", 1);
+    setenv("MESA_DISK_CACHE_SINGLE_FILE", "1", 0);
+
+    // High-throughput Box64 ARM64 Dynarec defaults for locked 60 FPS on Snapdragon 8 Gen 2+
+    setenv("BOX64_DYNAREC", "1", 0);
+    setenv("BOX64_DYNAREC_BIGBLOCK", "3", 0);
+    setenv("BOX64_DYNAREC_CALLRET", "1", 0);
+    setenv("BOX64_DYNAREC_FASTNAN", "1", 0);
+    setenv("BOX64_DYNAREC_FASTROUND", "1", 0);
+    setenv("BOX64_DYNAREC_NATIVEFLAGS", "1", 0);
+    setenv("BOX64_DYNAREC_STRONGMEM", "1", 0);
+    setenv("BOX64_DYNAREC_ALIGNED_ATOMICS", "1", 0);
+    setenv("BOX64_DYNAREC_WAIT", "1", 0);
+    setenv("BOX64_NOBANNER", "1", 0);
 
     // 4. Load Mesa Turnip ICD (with graceful fallback to system Vulkan) + native AArch64 DXVK
     g_rt.vk_driver = mobiro::gfx::load_vulkan_driver(lib_dir);
@@ -198,7 +212,8 @@ Java_com_mobiro_runtime_MainActivity_nativeConfigureAndValidate(
     mobiro::gfx::D3D11ComBridge::global().set_present_hook(
         [](void*, uint32_t, uint32_t) {
             g_rt.touch_overlay.pack_quads(g_rt.touch_ctrl.build_hud_quads());
-            mobiro::gfx::DxvkInterop::global().pace_present();
+            const int64_t work_ns = mobiro::gfx::DxvkInterop::global().pace_present();
+            if (work_ns > 0) g_rt.balancer.report_frame_work(work_ns);
         });
     __android_log_print(ANDROID_LOG_INFO, kLogTag, "Vulkan ICD loaded: %s (turnip=%d, dxvk_native=%d)",
                         g_rt.vk_driver.loaded_path.c_str(),
@@ -255,6 +270,7 @@ Java_com_mobiro_runtime_MainActivity_nativeConfigureAndValidate(
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_mobiro_runtime_MainActivity_nativeGetDiagnosticsSummary(JNIEnv* env, jobject /*thiz*/) {
     const auto called = g_rt.box64.called_unresolved_imports();
+    const auto pace = mobiro::gfx::DxvkInterop::global().pacing_stats();
     std::string summary =
         std::string("Vk=") + (g_rt.vk_driver.using_turnip ? "Turnip" : "System") +
         " DXVK=" + (g_rt.dxvk_loaded.load(std::memory_order_relaxed) ? "native" : "none") +
@@ -266,7 +282,9 @@ Java_com_mobiro_runtime_MainActivity_nativeGetDiagnosticsSummary(JNIEnv* env, jo
         " IAT=" + std::to_string(g_rt.pe_image.imports_resolved) +
         "/" + std::to_string(g_rt.pe_image.imports_resolved + g_rt.pe_image.unresolved_imports.size()) +
         " missingCalled=" + std::to_string(called.size()) +
-        " fps=" + std::to_string(g_rt.target_fps.load(std::memory_order_relaxed));
+        " fps=" + std::to_string(g_rt.target_fps.load(std::memory_order_relaxed)) +
+        " frames=" + std::to_string(pace.frames_presented) +
+        " drops=" + std::to_string(pace.frames_dropped);
     return env->NewStringUTF(summary.c_str());
 }
 
@@ -280,10 +298,19 @@ Java_com_mobiro_runtime_MainActivity_nativeOnMemoryPressure(
 extern "C" JNIEXPORT void JNICALL
 Java_com_mobiro_runtime_MainActivity_nativeOnThermalHeadroom(
     JNIEnv* /*env*/, jobject /*thiz*/, jfloat headroom) {
-    // Step down from 60 -> 30 FPS cleanly before aggressive thermal throttling hits
-    int desired = (headroom >= 0.85f) ? 30 : 60;
-    g_rt.target_fps.store(desired, std::memory_order_relaxed);
-    mobiro::gfx::DxvkInterop::global().set_target_fps(desired);
+    // Hysteresis prevents 60<->30 ping-ponging on brief thermal spikes while protecting sustained 60 FPS
+    const int cur = g_rt.target_fps.load(std::memory_order_relaxed);
+    int desired = cur;
+    if (headroom >= 0.90f) {
+        desired = 30;
+    } else if (headroom <= 0.78f) {
+        desired = 60;
+    }
+    if (desired != cur) {
+        g_rt.target_fps.store(desired, std::memory_order_relaxed);
+        mobiro::gfx::DxvkInterop::global().set_target_fps(desired);
+        g_rt.balancer.update_target_work_duration((desired <= 30) ? 33'333'333LL : 16'666'666LL);
+    }
 }
 
 namespace {

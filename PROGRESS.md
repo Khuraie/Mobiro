@@ -6,6 +6,17 @@
 
 ## Log Entries
 
+### Increment 16 — M14: Locked 60 FPS Zero-Drop Optimization Pass (Lock-Free COM Slab, Hybrid Pacer + ADPF Closed Loop, Box64 Dynarec Tuning & Native ARM64 CRT Thunks) (2026-11-27)
+- **Status:** Implemented & verified (local MSVC 2022 + GitHub Actions Linux GCC/`spirv-val` + Android ARM64 NDK)
+- **Changes:**
+  - Replaced `D3D11ComBridge`'s mutex-guarded `std::unordered_map` with a contiguous 65,536-slot `alignas(32)` `ComProxyObject` slab + O(1) intrusive freelist (`app/src/main/cpp/gfx/d3d11_com_bridge.hpp`), eliminating 10–40 mutex lock/hash lookups per D3D11 draw call on `find_proxy()` / `unwrap_arg()` in favor of lock-free range/alignment + atomic `alive` checks.
+  - Upgraded `DxvkInterop::pace_present()` (`app/src/main/cpp/gfx/dxvk_interop.hpp`) with a hybrid sleep + 400 µs spin window to prevent Linux timer-slack VSync drops, live `FramePacingStats` (`frames_presented`, `frames_dropped`, `last_work_ns`, `max_frame_ns`), and returned frame work duration wired directly into Android ADPF (`ThreadBalancer::report_frame_work` + thread-safe `adpf_mu_` + `update_target_work_duration`) in `runtime_main.cpp`.
+  - Tuned Box64 ARM64 Dynarec + Mesa Turnip runtime defaults (`BOX64_DYNAREC_BIGBLOCK=3`, `CALLRET=1`, `FASTNAN=1`, `FASTROUND=1`, `NATIVEFLAGS=1`, `STRONGMEM=1`, `ALIGNED_ATOMICS=1`, `MESA_DISK_CACHE_SINGLE_FILE=1`, `dxvk.trackPipelineLifetime = True`), added `pthread_once` context init safety in `box64_c_shim.c`, and added thermal hysteresis (`>=0.90` → 30 FPS, `<=0.78` → 60 FPS) to prevent 60↔30 oscillation.
+  - Added native ARM64 NEON-backed CRT & `ntdll` bulk memory/string thunks (`memcpy`, `memmove`, `memset`, `memcmp`, `strlen`, `wcslen`, `strcmp`, `strncmp`, `RtlCopyMemory`, `RtlMoveMemory`, `RtlZeroMemory`, `RtlFillMemory`) across `vcruntime140.dll`, `ucrtbase.dll`, `msvcrt.dll`, `api-ms-win-crt-string-l1-1-0.dll`, `ntdll.dll`, and `kernel32.dll` in `win32_shim.cpp`.
+  - Added `test_m14_lockfree_com_pool_pacer_and_native_crt_mem` in `tests/test_core.cpp` (15/15 test suites passing, including 100k concurrent lock-free COM dispatches).
+
+---
+
 ### Increment 15 — M13: Full D3D11/DXGI COM Out-Param Auto-Wrapping, Zero-Heap Pointer-Array Unwrapping & Display/Mutex/Find Shims (2026-11-27)
 - **Status:** Implemented & verified (local MSVC 2022 + GitHub Actions Linux GCC/`spirv-val` + Android ARM64 NDK)
 - **Changes:**

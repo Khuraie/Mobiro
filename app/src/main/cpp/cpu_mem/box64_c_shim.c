@@ -4,6 +4,7 @@
 #include "x64emu.h"
 #include "emu/x64emu_private.h"
 
+#include <pthread.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -31,6 +32,14 @@ static const uint8_t g_box64_exit_stub[32] __attribute__((aligned(32))) = {
     0xC3
 };
 
+static pthread_once_t g_box64_ctx_once = PTHREAD_ONCE_INIT;
+
+static void mobiro_init_box64_context_once(void) {
+    if (!my_context) {
+        my_context = NewBox64Context(0);
+    }
+}
+
 int mobiro_box64_call_fn(uintptr_t fn_va,
                          uint64_t rcx,
                          uint64_t rdx,
@@ -42,10 +51,8 @@ int mobiro_box64_call_fn(uintptr_t fn_va,
                          uint64_t* out_rax) {
     (void)return_sentinel;
     if (!fn_va || !stack_base || stack_size < 0x1000u) return 0;
-    if (!my_context) {
-        my_context = NewBox64Context(0);
-        if (!my_context) return 0;
-    }
+    pthread_once(&g_box64_ctx_once, mobiro_init_box64_context_once);
+    if (!my_context) return 0;
 
     const uintptr_t stack_low = stack_base - (uintptr_t)stack_size;
     x64emu_t* emu = NewX64Emu(my_context, fn_va, stack_low, (int)stack_size, 0);

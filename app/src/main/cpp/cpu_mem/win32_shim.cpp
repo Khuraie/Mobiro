@@ -1111,6 +1111,84 @@ void thunk_FindNextFileW(x64emu_t* emu) {
     reg_rax(emu) = 0ULL;
 }
 
+// --- M14: Native ARM64 NEON-backed CRT & ntdll bulk memory/string thunks ---
+
+void thunk_memcpy(x64emu_t* emu) {
+    void* dst = reinterpret_cast<void*>(reg_rcx(emu));
+    const void* src = reinterpret_cast<const void*>(reg_rdx(emu));
+    const size_t n = static_cast<size_t>(reg_r8(emu));
+    if (dst && src && n) std::memcpy(dst, src, n);
+    reg_rax(emu) = reg_rcx(emu);
+}
+
+void thunk_memmove(x64emu_t* emu) {
+    void* dst = reinterpret_cast<void*>(reg_rcx(emu));
+    const void* src = reinterpret_cast<const void*>(reg_rdx(emu));
+    const size_t n = static_cast<size_t>(reg_r8(emu));
+    if (dst && src && n) std::memmove(dst, src, n);
+    reg_rax(emu) = reg_rcx(emu);
+}
+
+void thunk_memset(x64emu_t* emu) {
+    void* dst = reinterpret_cast<void*>(reg_rcx(emu));
+    const int val = static_cast<int>(reg_rdx(emu) & 0xFFu);
+    const size_t n = static_cast<size_t>(reg_r8(emu));
+    if (dst && n) std::memset(dst, val, n);
+    reg_rax(emu) = reg_rcx(emu);
+}
+
+void thunk_memcmp(x64emu_t* emu) {
+    const void* a = reinterpret_cast<const void*>(reg_rcx(emu));
+    const void* b = reinterpret_cast<const void*>(reg_rdx(emu));
+    const size_t n = static_cast<size_t>(reg_r8(emu));
+    const int cmp = (a && b && n) ? std::memcmp(a, b, n) : 0;
+    reg_rax(emu) = static_cast<uint64_t>(static_cast<int64_t>(cmp));
+}
+
+void thunk_RtlZeroMemory(x64emu_t* emu) {
+    void* dst = reinterpret_cast<void*>(reg_rcx(emu));
+    const size_t n = static_cast<size_t>(reg_rdx(emu));
+    if (dst && n) std::memset(dst, 0, n);
+    reg_rax(emu) = 0ULL;
+}
+
+void thunk_RtlFillMemory(x64emu_t* emu) {
+    void* dst = reinterpret_cast<void*>(reg_rcx(emu));
+    const size_t n = static_cast<size_t>(reg_rdx(emu));
+    const int val = static_cast<int>(reg_r8(emu) & 0xFFu);
+    if (dst && n) std::memset(dst, val, n);
+    reg_rax(emu) = 0ULL;
+}
+
+void thunk_strlen(x64emu_t* emu) {
+    const char* s = reinterpret_cast<const char*>(reg_rcx(emu));
+    reg_rax(emu) = s ? static_cast<uint64_t>(std::strlen(s)) : 0ULL;
+}
+
+void thunk_wcslen(x64emu_t* emu) {
+    const auto* s = reinterpret_cast<const uint16_t*>(reg_rcx(emu));
+    size_t len = 0;
+    if (s) {
+        while (s[len] != 0) ++len;
+    }
+    reg_rax(emu) = static_cast<uint64_t>(len);
+}
+
+void thunk_strcmp(x64emu_t* emu) {
+    const char* a = reinterpret_cast<const char*>(reg_rcx(emu));
+    const char* b = reinterpret_cast<const char*>(reg_rdx(emu));
+    const int cmp = (a && b) ? std::strcmp(a, b) : 0;
+    reg_rax(emu) = static_cast<uint64_t>(static_cast<int64_t>(cmp));
+}
+
+void thunk_strncmp(x64emu_t* emu) {
+    const char* a = reinterpret_cast<const char*>(reg_rcx(emu));
+    const char* b = reinterpret_cast<const char*>(reg_rdx(emu));
+    const size_t n = static_cast<size_t>(reg_r8(emu));
+    const int cmp = (a && b && n) ? std::strncmp(a, b, n) : 0;
+    reg_rax(emu) = static_cast<uint64_t>(static_cast<int64_t>(cmp));
+}
+
 // --- Input ---
 
 void thunk_XInputGetState(x64emu_t* emu) {
@@ -1566,6 +1644,29 @@ void Box64Bridge::register_default_win32_thunks() {
     register_thunk("user32.dll", "SetProcessDPIAware", &thunk_ReturnTrue);
     register_thunk("user32.dll", "GetKeyState", &thunk_ReturnZero);
     register_thunk("user32.dll", "GetAsyncKeyState", &thunk_ReturnZero);
+
+    // M14: Native ARM64 NEON-backed CRT & ntdll bulk memory/string thunks
+    const char* crt_dlls[] = {
+        "vcruntime140.dll", "ucrtbase.dll", "msvcrt.dll", "api-ms-win-crt-string-l1-1-0.dll"
+    };
+    for (const char* dll : crt_dlls) {
+        register_thunk(dll, "memcpy", &thunk_memcpy);
+        register_thunk(dll, "memmove", &thunk_memmove);
+        register_thunk(dll, "memset", &thunk_memset);
+        register_thunk(dll, "memcmp", &thunk_memcmp);
+        register_thunk(dll, "strlen", &thunk_strlen);
+        register_thunk(dll, "wcslen", &thunk_wcslen);
+        register_thunk(dll, "strcmp", &thunk_strcmp);
+        register_thunk(dll, "strncmp", &thunk_strncmp);
+    }
+    register_thunk("ntdll.dll", "RtlCopyMemory", &thunk_memcpy);
+    register_thunk("ntdll.dll", "RtlMoveMemory", &thunk_memmove);
+    register_thunk("ntdll.dll", "RtlZeroMemory", &thunk_RtlZeroMemory);
+    register_thunk("ntdll.dll", "RtlFillMemory", &thunk_RtlFillMemory);
+    register_thunk("kernel32.dll", "RtlCopyMemory", &thunk_memcpy);
+    register_thunk("kernel32.dll", "RtlMoveMemory", &thunk_memmove);
+    register_thunk("kernel32.dll", "RtlZeroMemory", &thunk_RtlZeroMemory);
+    register_thunk("kernel32.dll", "RtlFillMemory", &thunk_RtlFillMemory);
 }
 
 } // namespace mobiro::cpu

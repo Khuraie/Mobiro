@@ -61,6 +61,14 @@ struct SurfaceSnapshot {
     uint64_t generation = 0;
 };
 
+struct FramePacingStats {
+    uint64_t frames_presented = 0;
+    uint64_t frames_dropped = 0;
+    int64_t last_work_ns = 0;
+    int64_t last_frame_ns = 0;
+    int64_t max_frame_ns = 0;
+};
+
 // Bridges Android ANativeWindow + Mesa Turnip ICD + native AArch64 DXVK libraries
 // (libdxvk_d3d11.so / libdxvk_dxgi.so) with zero x86 emulation of graphics calls.
 class DxvkInterop {
@@ -122,28 +130,62 @@ public:
     void set_auto_wrap_com(bool enable) { auto_wrap_com_.store(enable, std::memory_order_release); }
     bool auto_wrap_com() const { return auto_wrap_com_.load(std::memory_order_acquire); }
 
-    // Sleeps the remainder of the active 60/30 FPS frame interval on Present()
-    void pace_present() {
-        const auto interval = std::chrono::nanoseconds(target_frame_interval_ns());
+    // Hybrid sleep + sub-ms spin frame pacer for zero-jitter 60/30 FPS presentation.
+    // Returns actual frame work duration (ns) for Android ADPF closed-loop frequency scaling.
+    int64_t pace_present() {
+        const int64_t interval_ns = target_frame_interval_ns();
+        const auto interval = std::chrono::nanoseconds(interval_ns);
         const auto now = std::chrono::steady_clock::now();
         std::chrono::steady_clock::time_point wake_at{};
+        int64_t work_ns = 0;
+        bool need_wait = false;
         {
             std::lock_guard<std::mutex> lock(mu_);
             if (last_present_.time_since_epoch().count() == 0) {
                 last_present_ = now;
-                return;
+                prev_frame_end_ = now;
+                stats_.frames_presented = 1;
+                return 0;
             }
+            work_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now - prev_frame_end_).count();
+            const int64_t frame_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now - last_present_).count();
+            ++stats_.frames_presented;
+            stats_.last_work_ns = work_ns;
+            stats_.last_frame_ns = frame_ns;
+            if (frame_ns > stats_.max_frame_ns) stats_.max_frame_ns = frame_ns;
+            if (frame_ns > interval_ns + 1'500'000LL) ++stats_.frames_dropped;
+
             wake_at = last_present_ + interval;
-            last_present_ = (wake_at > now) ? wake_at : now;
+            need_wait = (wake_at > now);
+            last_present_ = need_wait ? wake_at : now;
         }
-        if (wake_at > now) {
-            std::this_thread::sleep_until(wake_at);
+        if (need_wait) {
+            constexpr auto kSpinWindow = std::chrono::microseconds(400);
+            if (wake_at - now > kSpinWindow) {
+                std::this_thread::sleep_until(wake_at - kSpinWindow);
+            }
+            while (std::chrono::steady_clock::now() < wake_at) {
+                std::this_thread::yield();
+            }
         }
+        const auto end_tp = std::chrono::steady_clock::now();
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            prev_frame_end_ = end_tp;
+        }
+        return work_ns;
     }
 
     void reset_pacer() {
         std::lock_guard<std::mutex> lock(mu_);
         last_present_ = {};
+        prev_frame_end_ = {};
+        stats_ = {};
+    }
+
+    FramePacingStats pacing_stats() const {
+        std::lock_guard<std::mutex> lock(mu_);
+        return stats_;
     }
 
     void set_native_window(void* window, int32_t width = 0, int32_t height = 0) {
@@ -163,13 +205,13 @@ public:
 
     void set_target_fps(int32_t fps) {
         const int32_t clamped = (fps <= 30) ? 30 : 60;
+        target_fps_.store(clamped, std::memory_order_relaxed);
         std::lock_guard<std::mutex> lock(mu_);
         surface_.target_fps = clamped;
     }
 
-    int64_t target_frame_interval_ns() const {
-        std::lock_guard<std::mutex> lock(mu_);
-        return (surface_.target_fps <= 30) ? 33'333'333LL : 16'666'666LL;
+    int64_t target_frame_interval_ns() const noexcept {
+        return (target_fps_.load(std::memory_order_relaxed) <= 30) ? 33'333'333LL : 16'666'666LL;
     }
 
     SurfaceSnapshot surface() const {
@@ -221,8 +263,11 @@ private:
     mutable std::mutex mu_;
     DxvkBackendTable backend_{};
     SurfaceSnapshot surface_{};
+    std::atomic<int32_t> target_fps_{60};
     std::atomic<bool> auto_wrap_com_{false};
     std::chrono::steady_clock::time_point last_present_{};
+    std::chrono::steady_clock::time_point prev_frame_end_{};
+    FramePacingStats stats_{};
     void* dxgi_dl_ = nullptr;
     void* d3d11_dl_ = nullptr;
 };

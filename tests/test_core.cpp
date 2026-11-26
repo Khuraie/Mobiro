@@ -1731,6 +1731,132 @@ void test_m13_com_out_param_wrapping_and_array_unwrapping() {
     fs::remove_all(tmp);
 }
 
+void test_m14_lockfree_com_pool_pacer_and_native_crt_mem() {
+    // 1. Lock-free D3D11ComBridge slab: O(1) find/unwrap, misaligned safety, freelist reuse,
+    //    concurrent wrap/destroy stress, and 100,000 zero-lock COM dispatches
+    auto& com = mobiro::gfx::D3D11ComBridge::global();
+    com.clear();
+
+    struct FakeDrawCtx { const void* const* vtbl; uint64_t draws; };
+    static void* draw_vtbl[mobiro::gfx::d3d11_abi::D3D11DeviceContextSlots::kSlotCount]{};
+    draw_vtbl[mobiro::gfx::d3d11_abi::D3D11DeviceContextSlots::kDrawIndexed] =
+        reinterpret_cast<void*>(+[](void* s, uint64_t idx_cnt, uint64_t, uint64_t) -> uint64_t {
+            static_cast<FakeDrawCtx*>(s)->draws += idx_cnt;
+            return 0;
+        });
+
+    FakeDrawCtx nat_ctx{draw_vtbl, 0};
+    int dummy_a = 1, dummy_b = 2, dummy_c = 3;
+    auto* p0 = com.wrap(&dummy_a, mobiro::gfx::d3d11_abi::ComIfaceId::D3D11ResourceChild);
+    auto* p1 = com.wrap(&dummy_b, mobiro::gfx::d3d11_abi::ComIfaceId::D3D11ResourceChild);
+    assert(p0 && p1 && com.active_proxy_count() == 2);
+
+    // Arbitrary ints & misaligned in-slab pointers must never match or fault
+    assert(com.find_proxy(0) == nullptr);
+    assert(com.find_proxy(0xDEADBEEFULL) == nullptr);
+    assert(com.find_proxy(reinterpret_cast<uintptr_t>(p0) + 8) == nullptr);
+    assert(com.unwrap_arg(42) == 42);
+    assert(com.unwrap_arg(reinterpret_cast<uint64_t>(p0) + 8) == reinterpret_cast<uint64_t>(p0) + 8);
+    assert(com.unwrap_arg(reinterpret_cast<uint64_t>(p0)) == reinterpret_cast<uint64_t>(&dummy_a));
+
+    // O(1) intrusive freelist reuse
+    com.destroy_proxy(p0);
+    assert(com.find_proxy(reinterpret_cast<uintptr_t>(p0)) == nullptr);
+    assert(com.unwrap_arg(reinterpret_cast<uint64_t>(p0)) == reinterpret_cast<uint64_t>(p0));
+    auto* p2 = com.wrap(&dummy_c, mobiro::gfx::d3d11_abi::ComIfaceId::D3D11ResourceChild);
+    assert(p2 == p0 && p2->native_obj == &dummy_c && com.active_proxy_count() == 2);
+    com.destroy_proxy(p1);
+    com.destroy_proxy(p2);
+    assert(com.active_proxy_count() == 0);
+
+    auto* ctx_p = com.wrap(&nat_ctx, mobiro::gfx::d3d11_abi::ComIfaceId::D3D11DeviceContext);
+    assert(ctx_p != nullptr);
+
+    // Concurrent multi-thread wrap/find/destroy alongside 100k lock-free DrawIndexed dispatches
+    std::vector<std::thread> workers;
+    for (int t = 0; t < 4; ++t) {
+        workers.emplace_back([&com, t]() {
+            int local_obj = t + 100;
+            for (int i = 0; i < 400; ++i) {
+                auto* pr = com.wrap(&local_obj, mobiro::gfx::d3d11_abi::ComIfaceId::D3D11ResourceChild);
+                assert(pr != nullptr);
+                assert(com.find_proxy(reinterpret_cast<uintptr_t>(pr)) == pr);
+                assert(com.unwrap_arg(reinterpret_cast<uint64_t>(pr)) == reinterpret_cast<uint64_t>(&local_obj));
+                com.destroy_proxy(pr);
+            }
+        });
+    }
+    const auto* draw_stub = reinterpret_cast<const mobiro::cpu::NativeBridgeStub*>(
+        ctx_p->lpVtbl[mobiro::gfx::d3d11_abi::D3D11DeviceContextSlots::kDrawIndexed]);
+    auto draw_wrap = reinterpret_cast<void(*)(x64emu_t*, uintptr_t)>(draw_stub->wrapper_ptr);
+    x64emu_t emu{};
+    emu.rcx = reinterpret_cast<uint64_t>(ctx_p);
+    emu.rdx = 3; // 3 indices per draw
+    for (int i = 0; i < 100000; ++i) {
+        draw_wrap(&emu, static_cast<uintptr_t>(draw_stub->thunk_ptr));
+    }
+    for (auto& w : workers) w.join();
+    assert(nat_ctx.draws == 300000ULL);
+    assert(com.active_proxy_count() == 1);
+    com.clear();
+    assert(com.active_proxy_count() == 0);
+
+    // 2. Hybrid 60 FPS frame pacer telemetry + DXVK UMA pipeline lifetime config
+    auto& interop = mobiro::gfx::DxvkInterop::global();
+    interop.reset_pacer();
+    interop.set_target_fps(60);
+    assert(interop.pace_present() == 0);
+    const int64_t work_ns = interop.pace_present();
+    assert(work_ns >= 0);
+    const auto pstats = interop.pacing_stats();
+    assert(pstats.frames_presented == 2 && pstats.frames_dropped == 0);
+    interop.reset_pacer();
+
+    const std::string conf = mobiro::gfx::render_dxvk_conf({16384, 3, 60, false});
+    assert(conf.find("dxvk.trackPipelineLifetime = True") != std::string::npos);
+
+    // 3. Native ARM64 NEON-backed CRT & ntdll bulk memory/string thunks
+    mobiro::mem::GuestArena arena;
+    assert(arena.reserve(0x0000000100000000ULL, 128ULL * 1024 * 1024));
+    mobiro::validator::VfsMapper vfs;
+    mobiro::cpu::Box64Bridge bridge;
+    assert(bridge.initialize(&arena, &vfs));
+
+    char buf_a[32] = "SekiroShadowsDieTwice";
+    char buf_b[32]{};
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>(buf_b); emu.rdx = reinterpret_cast<uint64_t>(buf_a); emu.r8 = 22;
+    assert(bridge.invoke_thunk("vcruntime140.dll", "memcpy", &emu) && emu.rax == reinterpret_cast<uint64_t>(buf_b));
+    assert(std::strcmp(buf_b, "SekiroShadowsDieTwice") == 0);
+
+    // Overlapping memmove (shift right by 2)
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>(buf_b + 2); emu.rdx = reinterpret_cast<uint64_t>(buf_b); emu.r8 = 6;
+    assert(bridge.invoke_thunk("ucrtbase.dll", "memmove", &emu));
+    assert(std::memcmp(buf_b, "SeSekiro", 8) == 0);
+
+    // memset / RtlFillMemory / RtlZeroMemory
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>(buf_b); emu.rdx = 0x5A; emu.r8 = 16;
+    assert(bridge.invoke_thunk("msvcrt.dll", "memset", &emu) && buf_b[0] == 0x5A && buf_b[15] == 0x5A);
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>(buf_b); emu.rdx = 16; emu.r8 = 0x3C;
+    assert(bridge.invoke_thunk("ntdll.dll", "RtlFillMemory", &emu) && buf_b[0] == 0x3C && buf_b[15] == 0x3C);
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>(buf_b); emu.rdx = 16;
+    assert(bridge.invoke_thunk("ntdll.dll", "RtlZeroMemory", &emu) && buf_b[0] == 0 && buf_b[15] == 0);
+
+    // strlen, wcslen, strcmp, strncmp, memcmp
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>(buf_a);
+    assert(bridge.invoke_thunk("api-ms-win-crt-string-l1-1-0.dll", "strlen", &emu) && emu.rax == 21);
+    const uint16_t w_str[] = {'A','s','h','i','n','a', 0};
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>(w_str);
+    assert(bridge.invoke_thunk("ucrtbase.dll", "wcslen", &emu) && emu.rax == 6);
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>("Ashina"); emu.rdx = reinterpret_cast<uint64_t>("Ashina");
+    assert(bridge.invoke_thunk("ucrtbase.dll", "strcmp", &emu) && emu.rax == 0);
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>("Ashina1"); emu.rdx = reinterpret_cast<uint64_t>("Ashina2"); emu.r8 = 6;
+    assert(bridge.invoke_thunk("ucrtbase.dll", "strncmp", &emu) && emu.rax == 0);
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>("abcd"); emu.rdx = reinterpret_cast<uint64_t>("abce"); emu.r8 = 4;
+    assert(bridge.invoke_thunk("vcruntime140.dll", "memcmp", &emu) && static_cast<int64_t>(emu.rax) < 0);
+
+    bridge.shutdown();
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1759,6 +1885,7 @@ int main(int argc, char** argv) {
     test_m11_box64_onebridge_condvar_sem_and_crt();
     test_m12_dep_dll_unresolved_trap_and_create_thread_exec();
     test_m13_com_out_param_wrapping_and_array_unwrapping();
+    test_m14_lockfree_com_pool_pacer_and_native_crt_mem();
     std::cout << "All Mobiro core unit tests passed.\n";
     return 0;
 }

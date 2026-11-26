@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <fstream>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -117,11 +118,23 @@ public:
 
     void report_frame_work(int64_t actual_work_ns) {
 #if defined(__ANDROID__) && __ANDROID_API__ >= 33
+        if (actual_work_ns <= 0) return;
+        std::lock_guard<std::mutex> lk(adpf_mu_);
         if (adpf_session_) {
             APerformanceHint_reportActualWorkDuration(adpf_session_, actual_work_ns);
         }
 #else
         (void)actual_work_ns;
+#endif
+    }
+
+    void update_target_work_duration(int64_t target_ns) {
+        std::lock_guard<std::mutex> lk(adpf_mu_);
+        target_ns_ = target_ns;
+#if defined(__ANDROID__) && __ANDROID_API__ >= 33
+        if (adpf_session_) {
+            APerformanceHint_updateTargetWorkDuration(adpf_session_, target_ns_);
+        }
 #endif
     }
 
@@ -132,6 +145,7 @@ public:
 private:
     void register_adpf_tid(int32_t tid) {
 #if defined(__ANDROID__) && __ANDROID_API__ >= 33
+        std::lock_guard<std::mutex> lk(adpf_mu_);
         if (!adpf_mgr_) return;
         if (std::find(critical_tids_.begin(), critical_tids_.end(), tid) != critical_tids_.end())
             return;
@@ -145,6 +159,7 @@ private:
     }
 
     CpuTopology topo_;
+    std::mutex adpf_mu_;
     int64_t target_ns_ = 16'666'666;
     std::vector<int32_t> critical_tids_;
 #if defined(__ANDROID__) && __ANDROID_API__ >= 33

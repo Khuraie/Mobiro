@@ -4,84 +4,126 @@
 #include "../cpu_mem/box64_bridge.hpp"
 
 #include <array>
+#include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
-#include <unordered_map>
 #include <utility>
 
 namespace mobiro::gfx {
 
 // Win64 COM proxy object returned to guest x86_64 code.
-// Guest executes `mov rax, [rcx]; call [rax + slot*8]`, hitting a NativeBridgeStub
-// (0xCC 'M' 'B' <dispatch_com_slot<Slot>> 0xC3) that bridges straight to native ARM64 DXVK.
-struct ComProxyObject {
-    const uintptr_t* lpVtbl = nullptr;
-    void* native_obj = nullptr;
-    d3d11_abi::ComIfaceId iface = d3d11_abi::ComIfaceId::Unknown;
+// Allocated from a contiguous lock-free slab so hot-path find/unwrap is O(1) with zero mutexes.
+struct alignas(32) ComProxyObject {
+    const uintptr_t* lpVtbl = nullptr;                            // +0x00: Win64 COM vtable pointer
+    void* native_obj = nullptr;                                   // +0x08: native AArch64 DXVK object
+    d3d11_abi::ComIfaceId iface = d3d11_abi::ComIfaceId::Unknown; // +0x10
+    std::atomic<uint32_t> alive{0};                               // +0x14: lock-free validity flag
+    uint32_t next_free = 0xFFFFFFFFu;                             // +0x18: intrusive freelist index
 };
+static_assert(sizeof(ComProxyObject) == 32);
+static_assert(offsetof(ComProxyObject, lpVtbl) == 0);
 
 using PresentHookFn = std::function<void(void* native_swap_chain, uint32_t sync_interval, uint32_t flags)>;
 
 class D3D11ComBridge {
 public:
     static constexpr size_t kMaxSlots = d3d11_abi::D3D11DeviceContextSlots::kSlotCount; // 115
+    // shortcut: fixed 65536-slot proxy slab (~2 MB); grow to segmented slabs if a title exceeds 64k live D3D11 objects.
+    static constexpr size_t kMaxProxies = 65536;
+    static constexpr uint32_t kInvalidSlot = 0xFFFFFFFFu;
 
     static D3D11ComBridge& global() {
         static D3D11ComBridge inst;
         return inst;
     }
 
-    D3D11ComBridge() { init_vtables(std::make_index_sequence<kMaxSlots>{}); }
+    D3D11ComBridge() : pool_(std::make_unique<ComProxyObject[]>(kMaxProxies)) {
+        pool_begin_ = reinterpret_cast<uintptr_t>(pool_.get());
+        pool_end_ = pool_begin_ + kMaxProxies * sizeof(ComProxyObject);
+        init_vtables(std::make_index_sequence<kMaxSlots>{});
+    }
 
     void set_present_hook(PresentHookFn fn) {
         std::lock_guard<std::mutex> lk(mu_);
+        has_present_hook_.store(static_cast<bool>(fn), std::memory_order_release);
         present_hook_ = std::move(fn);
     }
 
     ComProxyObject* wrap(void* native_obj, d3d11_abi::ComIfaceId iface) {
         if (!native_obj) return nullptr;
-        auto* proxy = new ComProxyObject();
+        std::lock_guard<std::mutex> lk(mu_);
+        uint32_t idx = kInvalidSlot;
+        if (free_head_ != kInvalidSlot) {
+            idx = free_head_;
+            free_head_ = pool_[idx].next_free;
+        } else if (bump_next_ < kMaxProxies) {
+            idx = static_cast<uint32_t>(bump_next_++);
+        } else {
+            return nullptr;
+        }
+        auto* proxy = &pool_[idx];
         proxy->lpVtbl = vtable_ptrs_.data();
         proxy->native_obj = native_obj;
         proxy->iface = iface;
-
-        std::lock_guard<std::mutex> lk(mu_);
-        proxies_[reinterpret_cast<uintptr_t>(proxy)] = proxy;
+        proxy->next_free = kInvalidSlot;
+        proxy->alive.store(1u, std::memory_order_release);
+        active_count_.fetch_add(1, std::memory_order_relaxed);
         return proxy;
     }
 
-    // Safely unwraps a guest pointer if and only if it is a registered ComProxyObject.
+    // Lock-free O(1) unwrap: checks slab range + 32-byte alignment + atomic alive flag.
     // Never dereferences arbitrary integers or non-proxy guest memory.
-    uint64_t unwrap_arg(uint64_t raw) const {
-        std::lock_guard<std::mutex> lk(mu_);
-        auto it = proxies_.find(static_cast<uintptr_t>(raw));
-        return (it != proxies_.end()) ? reinterpret_cast<uint64_t>(it->second->native_obj) : raw;
+    inline uint64_t unwrap_arg(uint64_t raw) const noexcept {
+        const uintptr_t addr = static_cast<uintptr_t>(raw);
+        if (addr < pool_begin_ || addr >= pool_end_) return raw;
+        if (((addr - pool_begin_) & (sizeof(ComProxyObject) - 1)) != 0) return raw;
+        const auto* p = reinterpret_cast<const ComProxyObject*>(addr);
+        return p->alive.load(std::memory_order_acquire)
+                   ? reinterpret_cast<uint64_t>(p->native_obj)
+                   : raw;
     }
 
-    ComProxyObject* find_proxy(uintptr_t addr) const {
-        std::lock_guard<std::mutex> lk(mu_);
-        auto it = proxies_.find(addr);
-        return (it != proxies_.end()) ? it->second : nullptr;
+    inline ComProxyObject* find_proxy(uintptr_t addr) const noexcept {
+        if (addr < pool_begin_ || addr >= pool_end_) return nullptr;
+        if (((addr - pool_begin_) & (sizeof(ComProxyObject) - 1)) != 0) return nullptr;
+        auto* p = reinterpret_cast<ComProxyObject*>(addr);
+        return p->alive.load(std::memory_order_acquire) ? p : nullptr;
     }
 
     void destroy_proxy(ComProxyObject* proxy) {
         if (!proxy) return;
+        const uintptr_t addr = reinterpret_cast<uintptr_t>(proxy);
+        if (addr < pool_begin_ || addr >= pool_end_) return;
+        if (((addr - pool_begin_) & (sizeof(ComProxyObject) - 1)) != 0) return;
+
         std::lock_guard<std::mutex> lk(mu_);
-        proxies_.erase(reinterpret_cast<uintptr_t>(proxy));
-        delete proxy;
+        if (proxy->alive.exchange(0u, std::memory_order_acq_rel) == 0u) return;
+        proxy->native_obj = nullptr;
+        const uint32_t idx = static_cast<uint32_t>(proxy - pool_.get());
+        proxy->next_free = free_head_;
+        free_head_ = idx;
+        active_count_.fetch_sub(1, std::memory_order_relaxed);
     }
 
     void clear() {
         std::lock_guard<std::mutex> lk(mu_);
-        for (auto& [_, p] : proxies_) delete p;
-        proxies_.clear();
+        for (size_t i = 0; i < bump_next_; ++i) {
+            pool_[i].alive.store(0u, std::memory_order_release);
+            pool_[i].native_obj = nullptr;
+            pool_[i].next_free = kInvalidSlot;
+        }
+        bump_next_ = 0;
+        free_head_ = kInvalidSlot;
+        active_count_.store(0, std::memory_order_relaxed);
+        has_present_hook_.store(false, std::memory_order_release);
         present_hook_ = nullptr;
     }
 
-    size_t active_proxy_count() const {
-        std::lock_guard<std::mutex> lk(mu_);
-        return proxies_.size();
+    size_t active_proxy_count() const noexcept {
+        return active_count_.load(std::memory_order_relaxed);
     }
 
     // Invokes a COM vtable slot directly from a Win64 x64emu_t register + XMM + stack frame
@@ -115,7 +157,8 @@ public:
 
         // Intercept IDXGISwapChain::Present (slot 8) for overlay compositing & frame pacing
         if constexpr (Slot == d3d11_abi::DXGISwapChainSlots::kPresent) {
-            if (proxy->iface == d3d11_abi::ComIfaceId::DXGISwapChain) {
+            if (proxy->iface == d3d11_abi::ComIfaceId::DXGISwapChain &&
+                self.has_present_hook_.load(std::memory_order_acquire)) {
                 PresentHookFn hook;
                 {
                     std::lock_guard<std::mutex> lk(self.mu_);
@@ -301,7 +344,13 @@ private:
     mutable std::mutex mu_;
     std::array<cpu::NativeBridgeStub, kMaxSlots> stubs_{};
     std::array<uintptr_t, kMaxSlots> vtable_ptrs_{};
-    std::unordered_map<uintptr_t, ComProxyObject*> proxies_;
+    std::unique_ptr<ComProxyObject[]> pool_;
+    uintptr_t pool_begin_ = 0;
+    uintptr_t pool_end_ = 0;
+    size_t bump_next_ = 0;
+    uint32_t free_head_ = kInvalidSlot;
+    std::atomic<size_t> active_count_{0};
+    std::atomic<bool> has_present_hook_{false};
     PresentHookFn present_hook_;
 };
 
