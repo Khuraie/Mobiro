@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 namespace mobiro::gfx {
@@ -163,10 +164,49 @@ public:
     const std::vector<HudVertex>& vertices() const { return vertices_; }
     size_t vertex_bytes() const { return vertices_.size() * sizeof(HudVertex); }
 
+    // Dynamic Vulkan draw-pass hook (zero compile-time LunarG SDK header dependency).
+    // Bound once native DXVK swapchain command buffer + pipeline handles are attached.
+    using PfnVkCmdBindPipeline = void (*)(void* cmd, uint32_t bind_point, uint64_t pipeline);
+    using PfnVkCmdBindVertexBuffers = void (*)(void* cmd, uint32_t first, uint32_t count,
+                                               const uint64_t* buffers, const uint64_t* offsets);
+    using PfnVkCmdDraw = void (*)(void* cmd, uint32_t vtx_count, uint32_t inst_count,
+                                  uint32_t first_vtx, uint32_t first_inst);
+
+    struct VkDrawBindings {
+        uint64_t pipeline = 0;
+        uint64_t vertex_buffer = 0;
+        void* mapped_vbo = nullptr;
+        size_t mapped_capacity_bytes = 0;
+        PfnVkCmdBindPipeline cmd_bind_pipeline = nullptr;
+        PfnVkCmdBindVertexBuffers cmd_bind_vbo = nullptr;
+        PfnVkCmdDraw cmd_draw = nullptr;
+    };
+
+    void attach_draw_bindings(const VkDrawBindings& b) { bindings_ = b; }
+
+    // Uploads packed HUD vertices into the mapped host-coherent VBO and records a single vkCmdDraw.
+    bool record_draw_commands(void* vk_cmd_buffer) const {
+        if (!vk_cmd_buffer || !enabled() || vertices_.empty()) return false;
+        if (!bindings_.pipeline || !bindings_.vertex_buffer || !bindings_.mapped_vbo ||
+            !bindings_.cmd_bind_pipeline || !bindings_.cmd_bind_vbo || !bindings_.cmd_draw) {
+            return false;
+        }
+        const size_t bytes = vertex_bytes();
+        if (bytes > bindings_.mapped_capacity_bytes) return false;
+
+        std::memcpy(bindings_.mapped_vbo, vertices_.data(), bytes);
+        const uint64_t offset = 0;
+        bindings_.cmd_bind_pipeline(vk_cmd_buffer, /*VK_PIPELINE_BIND_POINT_GRAPHICS=*/0u, bindings_.pipeline);
+        bindings_.cmd_bind_vbo(vk_cmd_buffer, 0u, 1u, &bindings_.vertex_buffer, &offset);
+        bindings_.cmd_draw(vk_cmd_buffer, static_cast<uint32_t>(vertices_.size()), 1u, 0u, 0u);
+        return true;
+    }
+
 private:
     std::atomic<bool> enabled_{true};
     PfnGetInstanceProcAddr get_instance_proc_addr_ = nullptr;
     std::vector<HudVertex> vertices_;
+    VkDrawBindings bindings_{};
 };
 
 } // namespace mobiro::gfx

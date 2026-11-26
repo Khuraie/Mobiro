@@ -26,36 +26,74 @@ class GuestExecutor {
 public:
     static constexpr uint64_t kReturnSentinel = 0x0000DEAD0000C0DEULL;
 
-    static ExecutionResult run_entry(const LoadedPeImage& img,
-                                     const Win64ThreadEnv& tenv,
-                                     Box64Bridge& /*bridge*/,
-                                     size_t max_steps = 4096) {
+    static ExecutionResult call_guest_fn(uintptr_t fn_va,
+                                         uint64_t rcx,
+                                         uint64_t rdx,
+                                         uint64_t r8,
+                                         const Win64ThreadEnv& tenv,
+                                         size_t max_steps = 4096) {
         ExecutionResult res;
-        if (!img.ok || !tenv.teb || !tenv.stack_base) {
-            res.error = "Invalid PE image or Win64ThreadEnv.";
+        if (!fn_va || !tenv.teb || !tenv.stack_base) {
+            res.error = "Invalid guest function address or Win64ThreadEnv.";
             return res;
         }
-
         x64emu_t emu{};
-        // Win64 ABI requires RSP % 16 == 8 at function entry (return address pushed at [RSP])
         uint64_t rsp = (tenv.stack_base - 0x100) & ~uint64_t(0xF);
         rsp -= 8;
         uint64_t sentinel = kReturnSentinel;
         std::memcpy(reinterpret_cast<void*>(rsp), &sentinel, 8);
-
 #ifdef MOBIRO_HAVE_BOX64
         emu.regs[_SP].q[0] = rsp;
-        emu.ip.q[0] = img.entry_point;
+        emu.regs[_CX].q[0] = rcx;
+        emu.regs[_DX].q[0] = rdx;
+        emu.regs[_R8].q[0] = r8;
+        emu.ip.q[0] = fn_va;
         emu.segs_offs[_GS] = reinterpret_cast<uintptr_t>(tenv.teb);
-        // shortcut: full Box64 Run() loop integration completes once arm64-v8a libbox64_core.a is linked.
         res.error = "Box64 Run() entrypoint wired; link arm64-v8a libbox64_core.a to execute full game.";
         return res;
 #else
         emu.rsp = rsp;
-        emu.rip = img.entry_point;
+        emu.rcx = rcx;
+        emu.rdx = rdx;
+        emu.r8  = r8;
+        emu.rip = fn_va;
         emu.gs_base = reinterpret_cast<uint64_t>(tenv.teb);
         return run_smoke_interpreter(emu, max_steps);
 #endif
+    }
+
+    // Walks IMAGE_TLS_DIRECTORY64::AddressOfCallBacks (offset +0x18) and invokes each
+    // non-null TLS callback with (mapped_base, DLL_PROCESS_ATTACH=1, nullptr).
+    static size_t run_tls_callbacks(const LoadedPeImage& img,
+                                    const Win64ThreadEnv& tenv,
+                                    size_t max_callbacks = 32) {
+        if (!img.ok || !img.tls_dir_va) return 0;
+        uint64_t cb_array_va = 0;
+        std::memcpy(&cb_array_va, reinterpret_cast<const void*>(img.tls_dir_va + 0x18), 8);
+        if (!cb_array_va) return 0;
+
+        size_t invoked = 0;
+        for (size_t i = 0; i < max_callbacks; ++i) {
+            uint64_t cb_va = 0;
+            std::memcpy(&cb_va, reinterpret_cast<const void*>(cb_array_va + i * 8), 8);
+            if (!cb_va) break;
+            auto r = call_guest_fn(static_cast<uintptr_t>(cb_va), img.mapped_base, 1ULL, 0ULL, tenv);
+            if (!r.ok) break;
+            ++invoked;
+        }
+        return invoked;
+    }
+
+    static ExecutionResult run_entry(const LoadedPeImage& img,
+                                     const Win64ThreadEnv& tenv,
+                                     Box64Bridge& /*bridge*/,
+                                     size_t max_steps = 4096) {
+        if (!img.ok) {
+            ExecutionResult res;
+            res.error = "Invalid PE image.";
+            return res;
+        }
+        return call_guest_fn(img.entry_point, img.mapped_base, 1ULL, 0ULL, tenv, max_steps);
     }
 
 private:

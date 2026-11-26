@@ -12,9 +12,15 @@ add_library(mobiro_core STATIC
 )
 target_include_directories(mobiro_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
-# Optional upstream Box64 submodule integration (built from source via scripts/fetch_third_party.*)
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../../../third_party/box64/CMakeLists.txt")
-    target_compile_definitions(mobiro_core PUBLIC MOBIRO_HAVE_BOX64=1)
+# Optional upstream Box64 prebuilt static library integration (built via scripts/build_box64_android.sh)
+set(MOBIRO_BOX64_PREBUILT "${CMAKE_CURRENT_SOURCE_DIR}/../../../../third_party/prebuilt/arm64-v8a/box64")
+if(ANDROID AND EXISTS "${MOBIRO_BOX64_PREBUILT}/include/x64emu.h")
+    file(GLOB MOBIRO_BOX64_LIBS "${MOBIRO_BOX64_PREBUILT}/lib/libbox64*.a")
+    if(MOBIRO_BOX64_LIBS)
+        target_compile_definitions(mobiro_core PUBLIC MOBIRO_HAVE_BOX64=1)
+        target_include_directories(mobiro_core PUBLIC "${MOBIRO_BOX64_PREBUILT}/include")
+        target_link_libraries(mobiro_core PUBLIC ${MOBIRO_BOX64_LIBS})
+    endif()
 endif()
 
 if(ANDROID)

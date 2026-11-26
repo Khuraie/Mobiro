@@ -16,8 +16,14 @@ jobs:
         run: |
           cmake -S app/src/main/cpp -B build-host -DMOBIRO_BUILD_HOST_TESTS=ON -DCMAKE_BUILD_TYPE=Release
           cmake --build build-host --parallel
-      - name: Run Core Tests
-        run: ctest --test-dir build-host --output-on-failure
+      - name: Run Core Tests & Validate Embedded SPIR-V Shaders
+        run: |
+          sudo apt-get update && sudo apt-get install -y spirv-tools
+          ctest --test-dir build-host --output-on-failure
+          mkdir -p build-host/spv
+          ./build-host/mobiro_core_tests --dump-spirv build-host/spv
+          spirv-val --target-env vulkan1.0 build-host/spv/hud.vert.spv
+          spirv-val --target-env vulkan1.0 build-host/spv/hud.frag.spv
 
   android-ndk-build:
     name: Android ARM64 NDK Build

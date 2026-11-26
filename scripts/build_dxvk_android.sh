@@ -46,7 +46,11 @@ meson setup "$BUILD_DIR/out" "$DXVK_SRC" \
   -Denable_d3d10=false \
   -Denable_d3d11=true \
   -Denable_dxgi=true \
-  -Ddxvk_native_wsi=sdl2
+  -Dnative_glfw=disabled \
+  -Dnative_sdl2=disabled \
+  -Dnative_sdl3=disabled \
+  -Dnative_xcb=disabled \
+  -Dnative_wayland=disabled
 
 ninja -C "$BUILD_DIR/out" src/dxgi/libdxvk_dxgi.so src/d3d11/libdxvk_d3d11.so
 cp -f "$BUILD_DIR/out/src/dxgi/libdxvk_dxgi.so" "$JNI_OUT/"

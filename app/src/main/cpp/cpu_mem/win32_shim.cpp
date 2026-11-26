@@ -1,11 +1,14 @@
 #include "box64_bridge.hpp"
 #include "pe_loader.hpp"
+#include "win32_ext_shims.hpp"
 #include "../audio/xaudio2_com.hpp"
+#include "../gfx/d3d11_com_bridge.hpp"
 #include "../gfx/dxvk_interop.hpp"
 #include "../input/input_router.hpp"
 
 #include <chrono>
 #include <cstring>
+#include <filesystem>
 #include <random>
 #include <thread>
 
@@ -705,6 +708,157 @@ void thunk_BCryptGenRandom(x64emu_t* emu) {
     reg_rax(emu) = 0ULL; // STATUS_SUCCESS
 }
 
+// --- Extended Win32 FS / Locale / Memory / Process / Registry / DirectInput8 ---
+
+void thunk_GetFileAttributesW(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    const std::string path = win32::utf16le_to_utf8(reinterpret_cast<const uint16_t*>(reg_rcx(emu)));
+    std::string host;
+    if (!b || !b->vfs() || !b->vfs()->resolve(path, host)) {
+        reg_rax(emu) = 0xFFFFFFFFULL; // INVALID_FILE_ATTRIBUTES
+        return;
+    }
+    std::error_code ec;
+    reg_rax(emu) = std::filesystem::is_directory(host, ec) ? 0x10ULL : 0x80ULL;
+}
+
+void thunk_GetFileAttributesA(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    const auto* s = reinterpret_cast<const char*>(reg_rcx(emu));
+    std::string host;
+    if (!b || !b->vfs() || !s || !b->vfs()->resolve(s, host)) {
+        reg_rax(emu) = 0xFFFFFFFFULL;
+        return;
+    }
+    std::error_code ec;
+    reg_rax(emu) = std::filesystem::is_directory(host, ec) ? 0x10ULL : 0x80ULL;
+}
+
+void thunk_CreateDirectoryW(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    const std::string path = win32::utf16le_to_utf8(reinterpret_cast<const uint16_t*>(reg_rcx(emu)));
+    std::string host;
+    if (!b || !b->vfs() || !b->vfs()->resolve_for_write(path, host)) {
+        reg_rax(emu) = 0ULL;
+        return;
+    }
+    std::error_code ec;
+    std::filesystem::create_directories(host, ec);
+    reg_rax(emu) = ec ? 0ULL : 1ULL;
+}
+
+void thunk_GetModuleFileNameW(x64emu_t* emu) {
+    auto* dst = reinterpret_cast<uint16_t*>(reg_rdx(emu));
+    const uint32_t cap = static_cast<uint32_t>(reg_r8(emu));
+    static const uint16_t kExeW[] = {
+        'C',':','\\','S','e','k','i','r','o','\\','S','e','k','i','r','o','.','e','x','e', 0
+    };
+    constexpr uint32_t kLen = 20;
+    if (!dst || cap == 0) { reg_rax(emu) = 0; return; }
+    const uint32_t n = std::min<uint32_t>(kLen, cap - 1);
+    std::memcpy(dst, kExeW, n * sizeof(uint16_t));
+    dst[n] = 0;
+    reg_rax(emu) = n;
+}
+
+void thunk_GetModuleFileNameA(x64emu_t* emu) {
+    auto* dst = reinterpret_cast<char*>(reg_rdx(emu));
+    const uint32_t cap = static_cast<uint32_t>(reg_r8(emu));
+    static const char kExeA[] = "C:\\Sekiro\\Sekiro.exe";
+    constexpr uint32_t kLen = 20;
+    if (!dst || cap == 0) { reg_rax(emu) = 0; return; }
+    const uint32_t n = std::min<uint32_t>(kLen, cap - 1);
+    std::memcpy(dst, kExeA, n);
+    dst[n] = '\0';
+    reg_rax(emu) = n;
+}
+
+void thunk_MultiByteToWideChar(x64emu_t* emu) {
+    const auto* src = reinterpret_cast<const uint8_t*>(reg_r8(emu));
+    const int cb = static_cast<int>(reg_r9(emu));
+    auto* dst = reinterpret_cast<uint16_t*>(stack_arg(emu, 0));
+    const int cch = static_cast<int>(stack_arg(emu, 1));
+    if (!src) { reg_rax(emu) = 0; return; }
+    const size_t slen = (cb < 0) ? (std::strlen(reinterpret_cast<const char*>(src)) + 1) : static_cast<size_t>(cb);
+    std::vector<uint16_t> tmp;
+    tmp.reserve(slen);
+    for (size_t i = 0; i < slen; ++i) {
+        const uint8_t c = src[i];
+        if (c < 0x80) {
+            tmp.push_back(c);
+        } else if ((c & 0xE0) == 0xC0 && i + 1 < slen) {
+            tmp.push_back(static_cast<uint16_t>(((c & 0x1F) << 6) | (src[i + 1] & 0x3F)));
+            ++i;
+        } else if ((c & 0xF0) == 0xE0 && i + 2 < slen) {
+            tmp.push_back(static_cast<uint16_t>(
+                ((c & 0x0F) << 12) | ((src[i + 1] & 0x3F) << 6) | (src[i + 2] & 0x3F)));
+            i += 2;
+        } else {
+            tmp.push_back(c);
+        }
+    }
+    if (cch == 0 || !dst) { reg_rax(emu) = tmp.size(); return; }
+    const size_t n = std::min<size_t>(tmp.size(), static_cast<size_t>(cch));
+    std::memcpy(dst, tmp.data(), n * sizeof(uint16_t));
+    reg_rax(emu) = n;
+}
+
+void thunk_WideCharToMultiByte(x64emu_t* emu) {
+    const auto* src = reinterpret_cast<const uint16_t*>(reg_r8(emu));
+    const int cch = static_cast<int>(reg_r9(emu));
+    auto* dst = reinterpret_cast<char*>(stack_arg(emu, 0));
+    const int cb = static_cast<int>(stack_arg(emu, 1));
+    if (!src) { reg_rax(emu) = 0; return; }
+    size_t wlen = 0;
+    if (cch < 0) {
+        while (src[wlen] != 0) ++wlen;
+        ++wlen;
+    } else {
+        wlen = static_cast<size_t>(cch);
+    }
+    std::string out;
+    out.reserve(wlen);
+    for (size_t i = 0; i < wlen; ++i) {
+        const uint16_t c = src[i];
+        if (c < 0x80) {
+            out.push_back(static_cast<char>(c));
+        } else if (c < 0x800) {
+            out.push_back(static_cast<char>(0xC0 | (c >> 6)));
+            out.push_back(static_cast<char>(0x80 | (c & 0x3F)));
+        } else {
+            out.push_back(static_cast<char>(0xE0 | (c >> 12)));
+            out.push_back(static_cast<char>(0x80 | ((c >> 6) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | (c & 0x3F)));
+        }
+    }
+    if (cb == 0 || !dst) { reg_rax(emu) = out.size(); return; }
+    const size_t n = std::min<size_t>(out.size(), static_cast<size_t>(cb));
+    std::memcpy(dst, out.data(), n);
+    reg_rax(emu) = n;
+}
+
+void thunk_GlobalMemoryStatusEx(x64emu_t* emu) {
+    auto* out = reinterpret_cast<win32::MemoryStatusEx*>(reg_rcx(emu));
+    if (!out || out->length < sizeof(win32::MemoryStatusEx)) { reg_rax(emu) = 0; return; }
+    win32::MemoryStatusEx ms{};
+    *out = ms;
+    reg_rax(emu) = 1ULL;
+}
+
+void thunk_EncodeDecodePointer(x64emu_t* emu) {
+    constexpr uint64_t kCookie = 0x5A3C96A51E2D3B4FULL;
+    reg_rax(emu) = reg_rcx(emu) ^ kCookie;
+}
+
+void thunk_SetThreadAffinityMask(x64emu_t* emu) { reg_rax(emu) = 0xFFULL; }
+void thunk_RegNotFound(x64emu_t* emu) { reg_rax(emu) = 2ULL; } // ERROR_FILE_NOT_FOUND
+
+void thunk_DirectInput8Create(x64emu_t* emu) {
+    auto** out_di = reinterpret_cast<void**>(reg_r9(emu));
+    const int32_t hr = win32::create_dinput8_com(out_di);
+    reg_rax(emu) = static_cast<uint64_t>(static_cast<uint32_t>(hr));
+}
+
 // --- Input ---
 
 void thunk_XInputGetState(x64emu_t* emu) {
@@ -980,6 +1134,34 @@ void Box64Bridge::register_default_win32_thunks() {
     register_thunk("winmm.dll", "timeBeginPeriod", &thunk_ReturnZero);
     register_thunk("winmm.dll", "timeEndPeriod", &thunk_ReturnZero);
     register_thunk("bcrypt.dll", "BCryptGenRandom", &thunk_BCryptGenRandom);
+
+    // Extended Win32 FS, Encoding, Memory, Process, Registry & DirectInput8
+    register_thunk("kernel32.dll", "GetFileAttributesW", &thunk_GetFileAttributesW);
+    register_thunk("kernel32.dll", "GetFileAttributesA", &thunk_GetFileAttributesA);
+    register_thunk("kernel32.dll", "CreateDirectoryW", &thunk_CreateDirectoryW);
+    register_thunk("kernel32.dll", "GetModuleFileNameW", &thunk_GetModuleFileNameW);
+    register_thunk("kernel32.dll", "GetModuleFileNameA", &thunk_GetModuleFileNameA);
+    register_thunk("kernel32.dll", "MultiByteToWideChar", &thunk_MultiByteToWideChar);
+    register_thunk("kernel32.dll", "WideCharToMultiByte", &thunk_WideCharToMultiByte);
+    register_thunk("kernel32.dll", "GlobalMemoryStatusEx", &thunk_GlobalMemoryStatusEx);
+    register_thunk("kernel32.dll", "EncodePointer", &thunk_EncodeDecodePointer);
+    register_thunk("kernel32.dll", "DecodePointer", &thunk_EncodeDecodePointer);
+    register_thunk("kernel32.dll", "IsDebuggerPresent", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "OutputDebugStringA", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "OutputDebugStringW", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "SetThreadPriority", &thunk_ReturnTrue);
+    register_thunk("kernel32.dll", "SetThreadAffinityMask", &thunk_SetThreadAffinityMask);
+    register_thunk("kernel32.dll", "FlsAlloc", &thunk_TlsAlloc);
+    register_thunk("kernel32.dll", "FlsSetValue", &thunk_TlsSetValue);
+    register_thunk("kernel32.dll", "FlsGetValue", &thunk_TlsGetValue);
+    register_thunk("kernel32.dll", "FlsFree", &thunk_ReturnTrue);
+    register_thunk("kernel32.dll", "SetUnhandledExceptionFilter", &thunk_ReturnZero);
+    register_thunk("advapi32.dll", "RegOpenKeyExW", &thunk_RegNotFound);
+    register_thunk("advapi32.dll", "RegOpenKeyExA", &thunk_RegNotFound);
+    register_thunk("advapi32.dll", "RegQueryValueExW", &thunk_RegNotFound);
+    register_thunk("advapi32.dll", "RegQueryValueExA", &thunk_RegNotFound);
+    register_thunk("advapi32.dll", "RegCloseKey", &thunk_ReturnZero);
+    register_thunk("dinput8.dll", "DirectInput8Create", &thunk_DirectInput8Create);
 }
 
 } // namespace mobiro::cpu

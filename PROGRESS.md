@@ -6,7 +6,19 @@
 
 ## Log Entries
 
+### Increment 10 — M8: Mesa Turnip `arm64-v8a` Green, Generated Win64→ARM64 D3D11/DXGI COM Bridge, Extended Win32/DirectInput8 Shims, Vulkan HUD Draw Pass & `spirv-val` CI (2026-11-27)
+- **Status:** Implemented & verified (local MSVC 2022 + GitHub Actions Linux GCC + `spirv-val` + Android ARM64 NDK)
+- **Changes:**
+  - Verified upstream **Mesa Turnip ICD (`libvulkan_freedreno.so`) `arm64-v8a` cross-build passed and uploaded artifact** on GitHub Actions NDK `27.2.12479018` (Run `45863055424`), meaning both Box64 and Mesa Turnip now build cleanly from upstream source.
+  - Added Python COM metadata generator (`scripts/gen_d3d11_thunks.py` → `app/src/main/cpp/gfx/d3d11_com_thunks_gen.hpp`, 6 DXGI/D3D11 interfaces, 204 vtable slots) and `D3D11ComBridge` (`app/src/main/cpp/gfx/d3d11_com_bridge.hpp`) providing `NativeBridgeStub`-backed Win64 → ARM64 COM proxy vtables with `IDXGISwapChain::Present` hook interception and automatic proxy cleanup on `Release() == 0`.
+  - Updated `scripts/build_dxvk_android.sh` to current upstream DXVK Meson options (`-Dnative_*=disabled`) and `CMakeLists.txt` to auto-link `third_party/prebuilt/arm64-v8a/box64/lib/libbox64*.a` when present.
+  - Added `GuestExecutor::call_guest_fn` & `run_tls_callbacks` (`IMAGE_TLS_DIRECTORY64` callbacks), `win32_ext_shims.hpp` (`GlobalMemoryStatusEx`, `DirectInput8Create` COM stub), and 25+ extended Win32 shims (`GetFileAttributesW/A`, `CreateDirectoryW`, `GetModuleFileNameW/A`, `MultiByteToWideChar`/`WideCharToMultiByte`, `EncodePointer`/`DecodePointer`, `Fls*`, `advapi32` registry stubs).
+  - Added dynamic Vulkan draw-command recording (`TouchOverlayVk::record_draw_commands`), `--dump-spirv` export in `tests/test_core.cpp`, and real Khronos `spirv-val --target-env vulkan1.0` validation in `.github/workflows/ci.yml`.
+
+---
+
 ### Increment 9 — M7: Dynamic Guest DLL Loader (`LoadLibrary`/`GetProcAddress`), Headless `user32`/`shell32`/`ole32`/`winmm`/`bcrypt` & Upstream Box64 Green + Turnip Fix (2026-11-27)
+- **Commit:** `1ea1843` (CI Run `45862992744` — Linux GCC tests 30s, Android ARM64 APK + artifact upload 1m32s; Turnip Run `45863055424` PASS)
 - **Status:** Implemented & verified (local MSVC 2022 + GitHub Actions Linux GCC & Android ARM64 NDK)
 - **Changes:**
   - Verified upstream **Box64 `arm64-v8a` ARM64 Dynarec cross-compilation passed** on GitHub Actions NDK 27.2.12479018 (Run `45862062389`), and fixed Mesa Turnip's host `zstd.h` leak in `scripts/build_turnip_android.sh` (`-Dzstd=disabled -Dxmlconfig=disabled -Dlibunwind=disabled`).

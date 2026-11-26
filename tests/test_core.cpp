@@ -6,10 +6,12 @@
 #include "cpu_mem/guest_executor.hpp"
 #include "cpu_mem/pe_loader.hpp"
 #include "cpu_mem/win64_teb.hpp"
+#include "gfx/d3d11_com_bridge.hpp"
 #include "gfx/dxvk_config_gen.hpp"
 #include "gfx/dxvk_interop.hpp"
 #include "gfx/pipeline_cache_warmer.hpp"
 #include "gfx/touch_overlay_vk.hpp"
+#include "cpu_mem/win32_ext_shims.hpp"
 #include "input/input_router.hpp"
 #include "input/touch_controller.hpp"
 #include "sched/thread_balancer.hpp"
@@ -1092,9 +1094,131 @@ void test_module_loader_and_headless_win32_ui() {
     fs::remove_all(tmp);
 }
 
+void test_d3d11_com_bridge_ext_win32_and_hud_draw() {
+    // 1. D3D11ComBridge: proxy wrapping, slot dispatch, IDXGISwapChain::Present hook, auto-free on Release==0
+    struct FakeSwapChain {
+        const void* const* vtbl;
+        uint32_t refs;
+        uint32_t present_calls;
+        uint32_t last_sync;
+    };
+    static void* fake_sc_vtbl[mobiro::gfx::d3d11_abi::DXGISwapChainSlots::kSlotCount]{};
+    fake_sc_vtbl[2] = reinterpret_cast<void*>(+[](void* self) -> uint64_t {
+        auto* sc = static_cast<FakeSwapChain*>(self);
+        return --sc->refs;
+    });
+    fake_sc_vtbl[mobiro::gfx::d3d11_abi::DXGISwapChainSlots::kPresent] =
+        reinterpret_cast<void*>(+[](void* self, uint64_t sync, uint64_t /*flags*/) -> uint64_t {
+            auto* sc = static_cast<FakeSwapChain*>(self);
+            ++sc->present_calls;
+            sc->last_sync = static_cast<uint32_t>(sync);
+            return 0ULL; // S_OK
+        });
+
+    FakeSwapChain native_sc{fake_sc_vtbl, 1, 0, 0};
+    auto& com = mobiro::gfx::D3D11ComBridge::global();
+    com.clear();
+
+    bool hook_fired = false;
+    com.set_present_hook([&](void* nat, uint32_t sync, uint32_t) {
+        hook_fired = (nat == &native_sc && sync == 1);
+    });
+
+    auto* proxy = com.wrap(&native_sc, mobiro::gfx::d3d11_abi::ComIfaceId::DXGISwapChain);
+    assert(proxy != nullptr && com.active_proxy_count() == 1);
+
+    // Invoke Present (slot 8) through NativeBridgeStub in proxy->lpVtbl[8]
+    const auto* present_stub = reinterpret_cast<const mobiro::cpu::NativeBridgeStub*>(
+        proxy->lpVtbl[mobiro::gfx::d3d11_abi::DXGISwapChainSlots::kPresent]);
+    assert(present_stub->trap_cc == 0xCC && present_stub->magic[0] == 'M' && present_stub->magic[1] == 'B');
+    x64emu_t emu{};
+    emu.rcx = reinterpret_cast<uint64_t>(proxy);
+    emu.rdx = 1; // SyncInterval = 1
+    emu.r8  = 0; // Flags = 0
+    reinterpret_cast<mobiro::cpu::NativeThunkFn>(present_stub->thunk_ptr)(&emu);
+    assert(emu.rax == 0 && hook_fired && native_sc.present_calls == 1 && native_sc.last_sync == 1);
+
+    // Invoke Release (slot 2) -> drops native refcount to 0 and reclaims proxy automatically
+    const auto* rel_stub = reinterpret_cast<const mobiro::cpu::NativeBridgeStub*>(proxy->lpVtbl[2]);
+    emu = {};
+    emu.rcx = reinterpret_cast<uint64_t>(proxy);
+    reinterpret_cast<mobiro::cpu::NativeThunkFn>(rel_stub->thunk_ptr)(&emu);
+    assert(emu.rax == 0 && com.active_proxy_count() == 0);
+
+    // 2. TouchOverlayVk dynamic Vulkan draw-command recording
+    mobiro::input::TouchController tc;
+    auto quads = tc.build_hud_quads();
+    mobiro::gfx::TouchOverlayVk overlay;
+    assert(overlay.pack_quads(quads) == 60);
+
+    std::vector<uint8_t> mapped_vbo(4096, 0);
+    static uint32_t drawn_vtx_count = 0;
+    drawn_vtx_count = 0;
+    mobiro::gfx::TouchOverlayVk::VkDrawBindings db{};
+    db.pipeline = 0x1234;
+    db.vertex_buffer = 0x5678;
+    db.mapped_vbo = mapped_vbo.data();
+    db.mapped_capacity_bytes = mapped_vbo.size();
+    db.cmd_bind_pipeline = [](void*, uint32_t, uint64_t) {};
+    db.cmd_bind_vbo = [](void*, uint32_t, uint32_t, const uint64_t*, const uint64_t*) {};
+    db.cmd_draw = [](void*, uint32_t vtx, uint32_t, uint32_t, uint32_t) { drawn_vtx_count = vtx; };
+    overlay.attach_draw_bindings(db);
+    int fake_cmd = 1;
+    assert(overlay.record_draw_commands(&fake_cmd) && drawn_vtx_count == 60);
+
+    // 3. Extended Win32 shims (MultiByteToWideChar, GlobalMemoryStatusEx, EncodePointer, DirectInput8)
+    mobiro::mem::GuestArena arena;
+    assert(arena.reserve(0x0000000100000000ULL, 64ULL * 1024 * 1024));
+    mobiro::validator::VfsMapper vfs;
+    mobiro::cpu::Box64Bridge bridge;
+    assert(bridge.initialize(&arena, &vfs));
+
+    const char* utf8_in = "Sekiro";
+    uint16_t utf16_out[16]{};
+    uint64_t mb_stack[8]{};
+    mb_stack[5] = reinterpret_cast<uint64_t>(utf16_out);
+    mb_stack[6] = 16;
+    emu = {};
+    emu.r8 = reinterpret_cast<uint64_t>(utf8_in);
+    emu.r9 = static_cast<uint64_t>(-1);
+    emu.rsp = reinterpret_cast<uint64_t>(mb_stack);
+    assert(bridge.invoke_thunk("kernel32.dll", "MultiByteToWideChar", &emu) && emu.rax == 7);
+    assert(mobiro::win32::utf16le_to_utf8(utf16_out) == "Sekiro");
+
+    mobiro::win32::MemoryStatusEx ms{};
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>(&ms);
+    assert(bridge.invoke_thunk("kernel32.dll", "GlobalMemoryStatusEx", &emu) && emu.rax == 1);
+    assert(ms.total_phys >= 8ULL * 1024 * 1024 * 1024);
+
+    emu = {}; emu.rcx = 0x12345678ULL;
+    assert(bridge.invoke_thunk("kernel32.dll", "EncodePointer", &emu));
+    emu.rcx = emu.rax;
+    assert(bridge.invoke_thunk("kernel32.dll", "DecodePointer", &emu) && emu.rax == 0x12345678ULL);
+
+    void* di8_raw = nullptr;
+    emu = {}; emu.r9 = reinterpret_cast<uint64_t>(&di8_raw);
+    assert(bridge.invoke_thunk("dinput8.dll", "DirectInput8Create", &emu) && emu.rax == 0 && di8_raw != nullptr);
+    auto* di8 = static_cast<mobiro::win32::IDirectInput8Com*>(di8_raw);
+    assert(di8->lpVtbl->EnumDevices(di8, 0, nullptr, nullptr, 0) == 0);
+    assert(di8->lpVtbl->Release(di8) == 0);
+
+    bridge.shutdown();
+}
+
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 3 && std::strcmp(argv[1], "--dump-spirv") == 0) {
+        const fs::path out_dir(argv[2]);
+        fs::create_directories(out_dir);
+        std::ofstream vf(out_dir / "hud.vert.spv", std::ios::binary | std::ios::trunc);
+        vf.write(reinterpret_cast<const char*>(mobiro::gfx::spirv::kHudVertSpv),
+                 sizeof(mobiro::gfx::spirv::kHudVertSpv));
+        std::ofstream ff(out_dir / "hud.frag.spv", std::ios::binary | std::ios::trunc);
+        ff.write(reinterpret_cast<const char*>(mobiro::gfx::spirv::kHudFragSpv),
+                 sizeof(mobiro::gfx::spirv::kHudFragSpv));
+        return 0;
+    }
     test_byof_validator_and_vfs();
     test_pe_loader_teb_and_win32_thunks();
     test_dxvk_config_and_topology();
@@ -1104,6 +1228,7 @@ int main() {
     test_touch_controller_and_cache_warmer();
     test_xaudio2_com_and_touch_overlay_vk();
     test_module_loader_and_headless_win32_ui();
+    test_d3d11_com_bridge_ext_win32_and_hud_draw();
     std::cout << "All Mobiro core unit tests passed.\n";
     return 0;
 }
