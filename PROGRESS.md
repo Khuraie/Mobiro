@@ -6,6 +6,17 @@
 
 ## Log Entries
 
+### Increment 17 — M15: O(1) Segregated GuestHeap, 64-Shard Lock Tables, Parallel File I/O & In-Swapchain HUD C ABI Exports (2026-11-27)
+- **Status:** Implemented & verified (local MSVC 2022 + GitHub Actions Linux GCC/`spirv-val` + Android ARM64 NDK)
+- **Changes:**
+  - Replaced `GuestHeap`'s `std::unordered_map` + O(N) linear `free_list_` scan/erase (`app/src/main/cpp/cpu_mem/win32_proc_sync.hpp`) with an O(1) 20-bucket power-of-2 segregated intrusive freelist (`16 B..8 MiB`) and 16-byte inline `BlockHeader` magic validation (chunk-bounds checked + double-free safe).
+  - Replaced the single global mutex in `SrwLockTable`, `CriticalSectionTable`, and `ConditionVariableTable` (`app/src/main/cpp/cpu_mem/win32_file_sync.hpp`) with a 64-shard `alignas(64)` `ShardedObjectMap` (`std::shared_mutex` reader-lock fast path) and added `alignas(64)` to `AddressWaitTable::Bucket` (`win32_thread_wait.hpp`), removing cross-core serialization across multi-threaded engine locks.
+  - Upgraded `FileHandleTable` (`win32_file_sync.hpp`) to per-file `OpenFile::io_mu` locking so concurrent `.bdt` archive streaming and save-file reads execute in parallel without blocking a global handle-table mutex.
+  - Made `TouchOverlayVk` (`touch_overlay_vk.hpp`) thread-safe across `pack_quads` / `record_draw_commands` and exported `mobiro_touch_overlay_pipeline_spec`, `mobiro_touch_overlay_attach_device`, and `mobiro_touch_overlay_record_draw` C ABI symbols from `libsekiro_runtime.so` (`runtime_main.cpp`).
+  - Added `test_m15_segregated_heap_sharded_sync_and_parallel_io` in `tests/test_core.cpp` (16/16 test suites passing).
+
+---
+
 ### Increment 16 — M14: Locked 60 FPS Zero-Drop Optimization Pass (Lock-Free COM Slab, Hybrid Pacer + ADPF Closed Loop, Box64 Dynarec Tuning & Native ARM64 CRT Thunks) (2026-11-27)
 - **Status:** Implemented & verified (local MSVC 2022 + GitHub Actions Linux GCC/`spirv-val` + Android ARM64 NDK)
 - **Changes:**

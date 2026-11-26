@@ -27,19 +27,33 @@ struct Win64SystemInfo {
     uint16_t processor_revision = 0x0100;
 };
 
-// Simple thread-safe bump + free-block-reusing heap backed directly by GuestArena.
-// Supports MSVC CRT startup (GetProcessHeap / HeapAlloc / HeapReAlloc / HeapFree / HeapSize).
+// O(1) power-of-2 segregated-freelist heap backed directly by GuestArena.
+// Supports MSVC CRT startup & high-churn game allocations (HeapAlloc / HeapReAlloc / HeapFree / HeapSize)
+// without hash-map lookups or O(N) freelist scans.
 class GuestHeap {
 public:
+    static constexpr size_t kMinClassShift = 4;  // 16 bytes
+    static constexpr size_t kMaxClassShift = 23; // 8 MiB
+    static constexpr size_t kNumBuckets = kMaxClassShift - kMinClassShift + 1; // 20 size classes
+    static constexpr uint64_t kMagicAlloc = 0x4D4248414C4C4F43ULL;
+    static constexpr uint64_t kMagicFree  = 0x4D42484652454544ULL;
+
+    struct alignas(16) BlockHeader {
+        uint64_t magic = 0;
+        uint64_t size = 0;
+    };
+    static_assert(sizeof(BlockHeader) == 16);
+
     bool initialize(mem::GuestArena* arena, size_t initial_bytes = 32 * 1024 * 1024) {
         std::lock_guard<std::mutex> lock(mu_);
         arena_ = arena;
         if (!arena_) return false;
+        reset_locked();
         base_ = arena_->virtual_alloc(0, initial_bytes, mem::kProtRead | mem::kProtWrite, true);
         if (!base_) return false;
-        capacity_ = initial_bytes;
+        chunks_.emplace_back(base_, base_ + initial_bytes);
         cursor_ = base_;
-        allocs_.clear();
+        chunk_end_ = base_ + initial_bytes;
         return true;
     }
 
@@ -48,44 +62,63 @@ public:
     uintptr_t alloc(size_t bytes, bool zero_memory) {
         std::lock_guard<std::mutex> lock(mu_);
         if (!base_) return 0;
-        const size_t req = std::max<size_t>(16, (bytes + 15) & ~size_t(15));
 
-        // First-fit reuse from freed blocks
-        for (auto it = free_list_.begin(); it != free_list_.end(); ++it) {
-            if (it->second >= req) {
-                uintptr_t ptr = it->first;
-                size_t cap = it->second;
-                free_list_.erase(it);
-                allocs_[ptr] = cap;
-                if (zero_memory) std::memset(reinterpret_cast<void*>(ptr), 0, cap);
-                return ptr;
+        const size_t min_sz = std::max<size_t>(16, (bytes + 15) & ~size_t(15));
+        const int bucket = bucket_index(min_sz);
+        const size_t cap = (bucket >= 0) ? (size_t(1) << (bucket + kMinClassShift)) : min_sz;
+
+        // O(1) pop from matching power-of-2 segregated freelist
+        if (bucket >= 0 && buckets_[bucket] != 0) {
+            const uintptr_t ptr = buckets_[bucket];
+            uintptr_t next = 0;
+            std::memcpy(&next, reinterpret_cast<const void*>(ptr), sizeof(next));
+            buckets_[bucket] = next;
+            auto* hdr = reinterpret_cast<BlockHeader*>(ptr - sizeof(BlockHeader));
+            hdr->magic = kMagicAlloc;
+            if (zero_memory) std::memset(reinterpret_cast<void*>(ptr), 0, hdr->size);
+            return ptr;
+        }
+        // Rare >8 MiB reuse
+        if (bucket < 0) {
+            for (auto it = large_free_.begin(); it != large_free_.end(); ++it) {
+                if (it->second >= cap) {
+                    const uintptr_t ptr = it->first;
+                    const size_t blk_cap = it->second;
+                    large_free_.erase(it);
+                    auto* hdr = reinterpret_cast<BlockHeader*>(ptr - sizeof(BlockHeader));
+                    hdr->magic = kMagicAlloc;
+                    if (zero_memory) std::memset(reinterpret_cast<void*>(ptr), 0, blk_cap);
+                    return ptr;
+                }
             }
         }
 
-        if (cursor_ + req > base_ + capacity_) {
-            // Grow with an overflow chunk from GuestArena
-            const size_t chunk = std::max<size_t>(req, 16 * 1024 * 1024);
-            uintptr_t extra = arena_->virtual_alloc(0, chunk, mem::kProtRead | mem::kProtWrite, true);
+        const size_t total = sizeof(BlockHeader) + cap;
+        if (cursor_ + total > chunk_end_) {
+            const size_t chunk = std::max<size_t>(total, 16 * 1024 * 1024);
+            const uintptr_t extra = arena_->virtual_alloc(0, chunk, mem::kProtRead | mem::kProtWrite, true);
             if (!extra) return 0;
-            base_extra_ = extra;
+            chunks_.emplace_back(extra, extra + chunk);
             cursor_ = extra;
-            capacity_ = chunk;
-            base_cur_end_ = extra + chunk;
+            chunk_end_ = extra + chunk;
         }
-        uintptr_t ptr = cursor_;
-        cursor_ += req;
-        allocs_[ptr] = req;
-        if (zero_memory) std::memset(reinterpret_cast<void*>(ptr), 0, req);
+
+        auto* hdr = reinterpret_cast<BlockHeader*>(cursor_);
+        hdr->magic = kMagicAlloc;
+        hdr->size = cap;
+        const uintptr_t ptr = cursor_ + sizeof(BlockHeader);
+        cursor_ += total;
+        if (zero_memory) std::memset(reinterpret_cast<void*>(ptr), 0, cap);
         return ptr;
     }
 
     uintptr_t realloc(uintptr_t old_ptr, size_t new_bytes, bool zero_memory) {
         if (!old_ptr) return alloc(new_bytes, zero_memory);
-        size_t old_sz = size_of(old_ptr);
+        const size_t old_sz = size_of(old_ptr);
         if (old_sz == ~size_t(0)) return 0;
         if (new_bytes <= old_sz) return old_ptr;
 
-        uintptr_t next = alloc(new_bytes, zero_memory);
+        const uintptr_t next = alloc(new_bytes, zero_memory);
         if (!next) return 0;
         std::memcpy(reinterpret_cast<void*>(next), reinterpret_cast<const void*>(old_ptr), old_sz);
         free(old_ptr);
@@ -95,38 +128,73 @@ public:
     bool free(uintptr_t ptr) {
         if (!ptr) return true;
         std::lock_guard<std::mutex> lock(mu_);
-        auto it = allocs_.find(ptr);
-        if (it == allocs_.end()) return false;
-        free_list_.emplace_back(it->first, it->second);
-        allocs_.erase(it);
+        auto* hdr = validate_alloc_locked(ptr);
+        if (!hdr) return false;
+        hdr->magic = kMagicFree;
+        const int bucket = bucket_index(static_cast<size_t>(hdr->size));
+        if (bucket >= 0) {
+            const uintptr_t prev = buckets_[bucket];
+            std::memcpy(reinterpret_cast<void*>(ptr), &prev, sizeof(prev));
+            buckets_[bucket] = ptr;
+        } else {
+            large_free_.emplace_back(ptr, static_cast<size_t>(hdr->size));
+        }
         return true;
     }
 
     size_t size_of(uintptr_t ptr) const {
+        if (!ptr) return ~size_t(0);
         std::lock_guard<std::mutex> lock(mu_);
-        auto it = allocs_.find(ptr);
-        return (it != allocs_.end()) ? it->second : ~size_t(0);
+        const auto* hdr = validate_alloc_locked(ptr);
+        return hdr ? static_cast<size_t>(hdr->size) : ~size_t(0);
     }
 
     void reset() {
         std::lock_guard<std::mutex> lock(mu_);
-        allocs_.clear();
-        free_list_.clear();
-        base_ = 0;
-        cursor_ = 0;
-        capacity_ = 0;
+        reset_locked();
     }
 
 private:
+    static int bucket_index(size_t sz) noexcept {
+        if (sz > (size_t(1) << kMaxClassShift)) return -1;
+        size_t cap = size_t(1) << kMinClassShift;
+        int idx = 0;
+        while (cap < sz && idx < static_cast<int>(kNumBuckets) - 1) {
+            cap <<= 1;
+            ++idx;
+        }
+        return idx;
+    }
+
+    BlockHeader* validate_alloc_locked(uintptr_t ptr) const noexcept {
+        if ((ptr & 15u) != 0 || ptr < sizeof(BlockHeader)) return nullptr;
+        const uintptr_t hdr_addr = ptr - sizeof(BlockHeader);
+        for (const auto& [lo, hi] : chunks_) {
+            if (hdr_addr >= lo && ptr < hi) {
+                auto* hdr = reinterpret_cast<BlockHeader*>(hdr_addr);
+                return (hdr->magic == kMagicAlloc) ? hdr : nullptr;
+            }
+        }
+        return nullptr;
+    }
+
+    void reset_locked() {
+        chunks_.clear();
+        large_free_.clear();
+        for (auto& b : buckets_) b = 0;
+        base_ = 0;
+        cursor_ = 0;
+        chunk_end_ = 0;
+    }
+
     mutable std::mutex mu_;
     mem::GuestArena* arena_ = nullptr;
     uintptr_t base_ = 0;
-    uintptr_t base_extra_ = 0;
-    uintptr_t base_cur_end_ = 0;
     uintptr_t cursor_ = 0;
-    size_t capacity_ = 0;
-    std::unordered_map<uintptr_t, size_t> allocs_;
-    std::vector<std::pair<uintptr_t, size_t>> free_list_;
+    uintptr_t chunk_end_ = 0;
+    std::vector<std::pair<uintptr_t, uintptr_t>> chunks_;
+    uintptr_t buckets_[kNumBuckets]{};
+    std::vector<std::pair<uintptr_t, size_t>> large_free_;
 };
 
 // Native C++ condition_variable-backed Win32 Event object table (manual/auto reset).

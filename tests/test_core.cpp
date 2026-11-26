@@ -1857,6 +1857,117 @@ void test_m14_lockfree_com_pool_pacer_and_native_crt_mem() {
     bridge.shutdown();
 }
 
+void test_m15_segregated_heap_sharded_sync_and_parallel_io() {
+    // 1. O(1) power-of-2 segregated GuestHeap: bucket reuse, double-free rejection, invalid ptr safety & MT churn
+    mobiro::mem::GuestArena arena;
+    assert(arena.reserve(0x0000000100000000ULL, 128ULL * 1024 * 1024));
+    mobiro::win32::GuestHeap heap;
+    assert(heap.initialize(&arena, 16 * 1024 * 1024));
+
+    const uintptr_t p512 = heap.alloc(400, true);
+    const uintptr_t p64k = heap.alloc(60000, false);
+    assert(p512 && p64k);
+    assert(heap.size_of(p512) == 512 && heap.size_of(p64k) == 65536);
+    assert(!heap.free(0x123456ULL)); // Bogus pointer rejected safely
+    assert(heap.free(p512));
+    assert(!heap.free(p512));        // Double-free rejected safely
+    assert(heap.size_of(p512) == ~size_t(0));
+
+    // Reallocating 300B must pop the exact freed 512B bucket slot (O(1))
+    const uintptr_t p512_reused = heap.alloc(300, true);
+    assert(p512_reused == p512);
+    const uintptr_t p_grown = heap.realloc(p512_reused, 2000, false);
+    assert(p_grown != 0 && heap.size_of(p_grown) == 2048);
+    assert(heap.free(p_grown) && heap.free(p64k));
+
+    std::vector<std::thread> heap_threads;
+    for (int t = 0; t < 4; ++t) {
+        heap_threads.emplace_back([&heap, t]() {
+            for (int i = 0; i < 600; ++i) {
+                const size_t sz = 24u + static_cast<size_t>((i * 73 + t * 17) % 4096);
+                const uintptr_t p = heap.alloc(sz, false);
+                assert(p != 0 && heap.size_of(p) >= sz);
+                std::memset(reinterpret_cast<void*>(p), static_cast<int>(t + 1), sz);
+                assert(heap.free(p));
+            }
+        });
+    }
+    for (auto& th : heap_threads) th.join();
+
+    // 2. 64-shard SrwLockTable + CriticalSectionTable concurrent correctness
+    mobiro::win32::SrwLockTable srws;
+    mobiro::win32::CriticalSectionTable css;
+    constexpr int kLocks = 16;
+    uint64_t srw_addrs[kLocks]{};
+    uint64_t cs_addrs[kLocks]{};
+    uint64_t srw_counts[kLocks]{};
+    uint64_t cs_counts[kLocks]{};
+
+    std::vector<std::thread> sync_threads;
+    for (int t = 0; t < 4; ++t) {
+        sync_threads.emplace_back([&]() {
+            for (int i = 0; i < 500; ++i) {
+                const int idx = i & (kLocks - 1);
+                const uintptr_t s_addr = reinterpret_cast<uintptr_t>(&srw_addrs[idx]);
+                const uintptr_t c_addr = reinterpret_cast<uintptr_t>(&cs_addrs[idx]);
+                srws.acquire_exclusive(s_addr);
+                ++srw_counts[idx];
+                srws.release_exclusive(s_addr);
+
+                css.enter(c_addr);
+                css.enter(c_addr); // recursive lock check
+                ++cs_counts[idx];
+                css.leave(c_addr);
+                css.leave(c_addr);
+            }
+        });
+    }
+    for (auto& th : sync_threads) th.join();
+    uint64_t srw_sum = 0, cs_sum = 0;
+    for (int i = 0; i < kLocks; ++i) { srw_sum += srw_counts[i]; cs_sum += cs_counts[i]; }
+    assert(srw_sum == 2000ULL && cs_sum == 2000ULL);
+    srws.clear();
+    css.clear();
+
+    // 3. Per-file parallel FileHandleTable streaming reads
+    const fs::path tmp = fs::temp_directory_path() / "mobiro_test_m15";
+    fs::remove_all(tmp);
+    fs::create_directories(tmp);
+    {
+        std::ofstream f0(tmp / "Data0.bdt", std::ios::binary);
+        std::ofstream f1(tmp / "Data1.bdt", std::ios::binary);
+        std::string s0(4096, 'A'), s1(4096, 'B');
+        f0.write(s0.data(), static_cast<std::streamsize>(s0.size()));
+        f1.write(s1.data(), static_cast<std::streamsize>(s1.size()));
+    }
+    mobiro::validator::VfsMapper vfs;
+    assert(vfs.index_root(tmp.string()));
+    mobiro::win32::FileHandleTable files;
+    const uint64_t h0 = files.open_read(&vfs, "Data0.bdt");
+    const uint64_t h1 = files.open_read(&vfs, "Data1.bdt");
+    assert(h0 != mobiro::win32::FileHandleTable::kInvalidHandle &&
+           h1 != mobiro::win32::FileHandleTable::kInvalidHandle);
+
+    std::vector<std::thread> io_threads;
+    for (int t = 0; t < 4; ++t) {
+        io_threads.emplace_back([&files, h0, h1, t]() {
+            const uint64_t h = (t & 1) ? h1 : h0;
+            const char expected = (t & 1) ? 'B' : 'A';
+            char buf[64]{};
+            for (int i = 0; i < 60; ++i) {
+                mobiro::win32::Win64Overlapped ov{};
+                ov.offset = static_cast<uint32_t>((i * 64) % 4032);
+                uint32_t nread = 0;
+                assert(files.read_file(h, buf, sizeof(buf), &nread, &ov) && nread == sizeof(buf));
+                assert(buf[0] == expected && buf[63] == expected);
+            }
+        });
+    }
+    for (auto& th : io_threads) th.join();
+    files.close_all();
+    fs::remove_all(tmp);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1886,6 +1997,7 @@ int main(int argc, char** argv) {
     test_m12_dep_dll_unresolved_trap_and_create_thread_exec();
     test_m13_com_out_param_wrapping_and_array_unwrapping();
     test_m14_lockfree_com_pool_pacer_and_native_crt_mem();
+    test_m15_segregated_heap_sharded_sync_and_parallel_io();
     std::cout << "All Mobiro core unit tests passed.\n";
     return 0;
 }

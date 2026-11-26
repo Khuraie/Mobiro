@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <vector>
 
 namespace mobiro::gfx {
@@ -135,6 +136,7 @@ public:
 
     // Packs normalized [0..1] screen quads into Vulkan NDC triangles (6 vertices per quad).
     size_t pack_quads(const std::vector<input::HudQuad>& quads) {
+        std::lock_guard<std::mutex> lk(mu_);
         vertices_.clear();
         if (!enabled() || quads.empty()) return 0;
 
@@ -207,22 +209,28 @@ public:
     // Dynamically resolves vkCmdBindPipeline / vkCmdBindVertexBuffers / vkCmdDraw from a live VkDevice
     bool resolve_device_draw_procs(void* vk_device, PfnGetDeviceProcAddr gdpa) {
         if (!vk_device || !gdpa) return false;
+        std::lock_guard<std::mutex> lk(mu_);
         bindings_.cmd_bind_pipeline = reinterpret_cast<PfnVkCmdBindPipeline>(gdpa(vk_device, "vkCmdBindPipeline"));
         bindings_.cmd_bind_vbo = reinterpret_cast<PfnVkCmdBindVertexBuffers>(gdpa(vk_device, "vkCmdBindVertexBuffers"));
         bindings_.cmd_draw = reinterpret_cast<PfnVkCmdDraw>(gdpa(vk_device, "vkCmdDraw"));
         return bindings_.cmd_bind_pipeline && bindings_.cmd_bind_vbo && bindings_.cmd_draw;
     }
 
-    void attach_draw_bindings(const VkDrawBindings& b) { bindings_ = b; }
+    void attach_draw_bindings(const VkDrawBindings& b) {
+        std::lock_guard<std::mutex> lk(mu_);
+        bindings_ = b;
+    }
 
     // Uploads packed HUD vertices into the mapped host-coherent VBO and records a single vkCmdDraw.
     bool record_draw_commands(void* vk_cmd_buffer) const {
-        if (!vk_cmd_buffer || !enabled() || vertices_.empty()) return false;
+        if (!vk_cmd_buffer || !enabled()) return false;
+        std::lock_guard<std::mutex> lk(mu_);
+        if (vertices_.empty()) return false;
         if (!bindings_.pipeline || !bindings_.vertex_buffer || !bindings_.mapped_vbo ||
             !bindings_.cmd_bind_pipeline || !bindings_.cmd_bind_vbo || !bindings_.cmd_draw) {
             return false;
         }
-        const size_t bytes = vertex_bytes();
+        const size_t bytes = vertices_.size() * sizeof(HudVertex);
         if (bytes > bindings_.mapped_capacity_bytes) return false;
 
         std::memcpy(bindings_.mapped_vbo, vertices_.data(), bytes);
@@ -234,6 +242,7 @@ public:
     }
 
 private:
+    mutable std::mutex mu_;
     std::atomic<bool> enabled_{true};
     PfnGetInstanceProcAddr get_instance_proc_addr_ = nullptr;
     std::vector<HudVertex> vertices_;

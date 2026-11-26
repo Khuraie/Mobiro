@@ -133,10 +133,46 @@ void process_game_activity_input(android_app* app) {
 
 } // namespace
 
-// Exported C symbol resolved via dlsym(RTLD_DEFAULT) by DXVK's AndroidWsiDriver
+// Exported C symbols resolved via dlsym(RTLD_DEFAULT) by DXVK's AndroidWsiDriver / Vulkan HUD hook
 extern "C" __attribute__((visibility("default")))
 void* mobiro_get_android_native_window() {
     return mobiro::gfx::DxvkInterop::global().surface().native_window;
+}
+
+extern "C" __attribute__((visibility("default")))
+const mobiro::gfx::TouchOverlayVk::HudPipelineSpec* mobiro_touch_overlay_pipeline_spec() {
+    static const auto spec = mobiro::gfx::TouchOverlayVk::pipeline_spec();
+    return &spec;
+}
+
+extern "C" __attribute__((visibility("default")))
+int mobiro_touch_overlay_attach_device(void* vk_device,
+                                       void* pfn_gdpa,
+                                       uint64_t pipeline,
+                                       uint64_t vertex_buffer,
+                                       void* mapped_vbo,
+                                       size_t capacity_bytes) {
+    if (!vk_device || !pfn_gdpa) return 0;
+    auto gdpa = reinterpret_cast<mobiro::gfx::TouchOverlayVk::PfnGetDeviceProcAddr>(pfn_gdpa);
+    mobiro::gfx::TouchOverlayVk::VkDrawBindings b{};
+    b.pipeline = pipeline;
+    b.vertex_buffer = vertex_buffer;
+    b.mapped_vbo = mapped_vbo;
+    b.mapped_capacity_bytes = capacity_bytes;
+    b.cmd_bind_pipeline = reinterpret_cast<mobiro::gfx::TouchOverlayVk::PfnVkCmdBindPipeline>(
+        gdpa(vk_device, "vkCmdBindPipeline"));
+    b.cmd_bind_vbo = reinterpret_cast<mobiro::gfx::TouchOverlayVk::PfnVkCmdBindVertexBuffers>(
+        gdpa(vk_device, "vkCmdBindVertexBuffers"));
+    b.cmd_draw = reinterpret_cast<mobiro::gfx::TouchOverlayVk::PfnVkCmdDraw>(
+        gdpa(vk_device, "vkCmdDraw"));
+    if (!b.cmd_bind_pipeline || !b.cmd_bind_vbo || !b.cmd_draw) return 0;
+    g_rt.touch_overlay.attach_draw_bindings(b);
+    return 1;
+}
+
+extern "C" __attribute__((visibility("default")))
+int mobiro_touch_overlay_record_draw(void* vk_cmd_buffer) {
+    return g_rt.touch_overlay.record_draw_commands(vk_cmd_buffer) ? 1 : 0;
 }
 
 extern "C" JNIEXPORT jstring JNICALL

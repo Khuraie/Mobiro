@@ -58,7 +58,7 @@ public:
     }
 
 private:
-    struct Bucket {
+    struct alignas(64) Bucket {
         std::mutex mu;
         std::condition_variable cv;
     };
