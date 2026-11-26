@@ -1427,11 +1427,12 @@ void test_m11_box64_onebridge_condvar_sem_and_crt() {
     const uint16_t dst_w[] = {'S','0','0','0','0','.','s','l','2', 0};
     emu = {}; emu.rcx = reinterpret_cast<uint64_t>(src_w); emu.rdx = reinterpret_cast<uint64_t>(dst_w);
     assert(bridge.invoke_thunk("kernel32.dll", "MoveFileExW", &emu) && emu.rax == 1);
-    assert(fs::exists(save_ov / "S0000.sl2") && !fs::exists(save_ov / "tmp.sl2"));
+    std::string moved_host;
+    assert(vfs.resolve("S0000.sl2", moved_host) && fs::exists(save_ov / "s0000.sl2") && !fs::exists(save_ov / "tmp.sl2"));
 
     emu = {}; emu.rcx = reinterpret_cast<uint64_t>(dst_w);
     assert(bridge.invoke_thunk("kernel32.dll", "DeleteFileW", &emu) && emu.rax == 1);
-    assert(!fs::exists(save_ov / "S0000.sl2"));
+    assert(!fs::exists(save_ov / "s0000.sl2") && !vfs.resolve("S0000.sl2", moved_host));
 
     bridge.shutdown();
     fs::remove_all(tmp);
