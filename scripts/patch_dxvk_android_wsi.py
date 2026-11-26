@@ -77,8 +77,8 @@ def main() -> int:
 
     insert_after(
         dxvk_core_dir / "meson.build",
-        "    'dxvk_swapchain_blitter.cpp',\n",
-        "    'mobiro_touch_hud.cpp',\n",
+        "  'dxvk_swapchain_blitter.cpp',\n",
+        "  'mobiro_touch_hud.cpp',\n",
         "mobiro_touch_hud.cpp",
     )
 
