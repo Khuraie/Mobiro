@@ -6,6 +6,17 @@
 
 ## Log Entries
 
+### Increment 22 — M20: Full-Stack Bundled APK Green (`52.9 MB`, All 3 Upstream Layers + `MobiroTouchHud`) & Android 15 MuMu Smoke Test Fixes (2026-11-27)
+- **Status:** Implemented & verified (GitHub Actions full-stack Run `45885793713` PASS + Android 15 MuMu Player live install & launch)
+- **Changes:**
+  - Fixed two real DXVK/patcher issues uncovered by compiling `patches/dxvk/mobiro_touch_hud.cpp` against live upstream DXVK (`doitsujin/dxvk`): corrected the 2-space `src/dxvk/meson.build` anchor in `scripts/patch_dxvk_android_wsi.py` (`a2fd958`) and switched `MobiroTouchHud` to 100% public `DxvkCommandList` draw methods (`cmdSetViewport`/`cmdSetScissor`/`cmdBindPipeline`/`cmdBindVertexBuffers`/`cmdDraw`) fed by `mobiro_touch_overlay_copy_vertices` (`4292a7f`).
+  - Fixed two real Android 15 runtime bugs caught during live MuMu Player testing (`967b2af`):
+    1. Added bare-soname `dlopen` fallback (`"libvulkan_freedreno.so"`, `"libdxvk_dxgi.so"`, `"libdxvk_d3d11.so"`) in `turnip_loader.hpp` and `dxvk_interop.hpp` so uncompressed `.so` libraries packaged with `android:extractNativeLibs="false"` load cleanly via Android's linker namespace.
+    2. Wrapped SAF `OpenDocumentTree` launch in `try/catch (ActivityNotFoundException)` in `MainActivity.kt` so Android builds without `DocumentsUI` stay running cleanly and show the target BYOF storage path instead of crashing `onCreate()`.
+  - Verified full-stack bundled APK (`Run 45885793713`, `52.9 MB`, all 5 uncompressed `arm64-v8a` `.so` libraries: `libsekiro_runtime.so` 23.7 MB + `libvulkan_freedreno.so` 8.8 MB + `libdxvk_d3d11.so` 6.3 MB + `libdxvk_dxgi.so` 4.4 MB + `libc++_shared.so` 1.3 MB) installed and stayed `"state": "running"` on Android 15 MuMu Player.
+
+---
+
 ### Increment 21 — M19: Win64 Implicit Static TLS (`GS:[0x58]`) Isolation & One-Command ADB BYOF Staging Script (2026-11-27)
 - **Status:** Implemented & verified (local MSVC 2022 + live retail BYOF PE64 dry-run + GitHub Actions CI)
 - **Changes:**
