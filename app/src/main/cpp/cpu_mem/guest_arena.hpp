@@ -42,8 +42,14 @@ class GuestArena {
 public:
     static constexpr uint32_t kGuestPageSize = 4096;
     static constexpr uint32_t kWinAllocGranularity = 65536;
+    using ProtSyncFn = void (*)(uintptr_t addr, size_t size, int prot);
 
     ~GuestArena() { release_all(); }
+
+    void set_prot_sync_hook(ProtSyncFn fn) {
+        std::lock_guard<std::mutex> lock(mu_);
+        prot_sync_hook_ = fn;
+    }
 
     bool reserve(uintptr_t preferred_base, size_t bytes) {
 #if defined(__linux__) || defined(__ANDROID__)
@@ -131,6 +137,7 @@ public:
         VirtualFree(reinterpret_cast<void*>(it->second.base), span, MEM_DECOMMIT);
 #endif
         it->second.committed = false;
+        if (prot_sync_hook_) prot_sync_hook_(it->second.base, span, kProtNone);
         return true;
     }
 
@@ -205,15 +212,20 @@ private:
 
     bool apply_host_protect(uintptr_t target, size_t aligned_len, int prot) {
 #if defined(__linux__) || defined(__ANDROID__)
-        // Guest x86_64 code pages are NEVER host-executable on ARM64; strip EXEC.
+        // Guest x86_64 code pages are NEVER host-executable on ARM64; strip EXEC for host mprotect,
+        // while forwarding the full guest prot (including kProtExec) to Box64's memprot table.
         int p = PROT_NONE;
         if (prot & kProtRead)  p |= PROT_READ;
         if (prot & kProtWrite) p |= PROT_WRITE;
-        return mprotect(reinterpret_cast<void*>(target), aligned_len, p) == 0;
+        if (mprotect(reinterpret_cast<void*>(target), aligned_len, p) != 0) return false;
+        if (prot_sync_hook_) prot_sync_hook_(target, aligned_len, prot);
+        return true;
 #elif defined(_WIN32)
         DWORD old_prot = 0;
-        return VirtualProtect(reinterpret_cast<void*>(target), aligned_len,
-                              to_win32_host_prot(prot), &old_prot) != 0;
+        if (VirtualProtect(reinterpret_cast<void*>(target), aligned_len,
+                           to_win32_host_prot(prot), &old_prot) == 0) return false;
+        if (prot_sync_hook_) prot_sync_hook_(target, aligned_len, prot);
+        return true;
 #else
         (void)target; (void)aligned_len; (void)prot;
         return false;
@@ -233,6 +245,7 @@ private:
     uintptr_t cursor_ = 0;
     size_t size_ = 0;
     size_t host_page_ = 4096;
+    ProtSyncFn prot_sync_hook_ = nullptr;
     std::unordered_map<uintptr_t, RegionRecord> regions_;
 };
 

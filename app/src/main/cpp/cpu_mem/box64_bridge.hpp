@@ -23,6 +23,8 @@ typedef struct x64emu_s x64emu_t;
 uint64_t* mobiro_box64_reg_ptr(x64emu_t* emu, int reg_id);
 float mobiro_box64_xmm_f32(const x64emu_t* emu, int xmm_idx);
 uintptr_t mobiro_box64_teb(const x64emu_t* emu);
+void mobiro_box64_ensure_init(void);
+void mobiro_box64_set_prot(uintptr_t addr, size_t size, int mobiro_prot);
 int mobiro_box64_call_fn(uintptr_t fn_va,
                          uint64_t rcx,
                          uint64_t rdx,
@@ -47,6 +49,18 @@ using x64emu_t = MobiroX64Emu;
 #endif
 
 namespace mobiro::cpu {
+
+inline void sync_box64_exec_region(const void* ptr, size_t bytes) {
+#ifdef MOBIRO_HAVE_BOX64
+    if (ptr && bytes) {
+        mobiro_box64_set_prot(reinterpret_cast<uintptr_t>(ptr), bytes,
+                              mem::kProtRead | mem::kProtWrite | mem::kProtExec);
+    }
+#else
+    (void)ptr;
+    (void)bytes;
+#endif
+}
 
 // Unified Win64 register & XMM accessors (works identically with Box64 C shim and host tests)
 inline uint64_t& emu_reg_rax(x64emu_t* e) {

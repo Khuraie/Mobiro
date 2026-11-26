@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 uint64_t* mobiro_box64_reg_ptr(x64emu_t* emu, int reg_id) {
@@ -72,6 +73,28 @@ static void mobiro_init_box64_context_once(void) {
         __android_log_print(ANDROID_LOG_WARN, "Mobiro",
                             "Box64 context ready (pagesize=%zu, dynarec=%d, ctx=%p)",
                             (size_t)box64_pagesize, BOX64ENV(dynarec), (void*)my_context);
+    }
+}
+
+void mobiro_box64_ensure_init(void) {
+    pthread_once(&g_box64_ctx_once, mobiro_init_box64_context_once);
+}
+
+void mobiro_box64_set_prot(uintptr_t addr, size_t size, int mobiro_prot) {
+    if (!addr || !size) return;
+    pthread_once(&g_box64_ctx_once, mobiro_init_box64_context_once);
+    if (!my_context) return;
+    const uintptr_t ps = box64_pagesize ? box64_pagesize : 4096;
+    const uintptr_t start = addr & ~(ps - 1);
+    const size_t len = ((addr - start) + size + ps - 1) & ~(ps - 1);
+    uint32_t p = 0;
+    if (mobiro_prot & 1) p |= PROT_READ;
+    if (mobiro_prot & 2) p |= PROT_WRITE;
+    if (mobiro_prot & 4) p |= PROT_EXEC;
+    if (p) {
+        setProtection(start, len, p);
+    } else {
+        freeProtection(start, len);
     }
 }
 

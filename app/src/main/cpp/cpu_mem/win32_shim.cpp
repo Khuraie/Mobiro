@@ -1503,6 +1503,7 @@ bool Box64Bridge::initialize(mem::GuestArena* arena, validator::VfsMapper* vfs) 
     stub_pool_ = new NativeBridgeStub[kMaxStubs];
 #endif
     stub_count_ = 0;
+    sync_box64_exec_region(stub_pool_, kMaxStubs * sizeof(NativeBridgeStub));
     heap_.initialize(arena_, 32 * 1024 * 1024);
     threads_.set_static_tls(&static_tls_);
     threads_.set_env_dispatch_callback(

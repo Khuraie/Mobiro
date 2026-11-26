@@ -55,6 +55,7 @@ private:
           stubs_[Is].wrapper_ptr = reinterpret_cast<uint64_t>(&mobiro_native_thunk_wrapper),
           stubs_[Is].thunk_ptr = reinterpret_cast<uint64_t>(&dispatch<Is>),
           vtbl_[Is] = reinterpret_cast<uintptr_t>(&stubs_[Is])), ...);
+        sync_box64_exec_region(stubs_.data(), sizeof(stubs_));
     }
     std::array<NativeBridgeStub, kSlots> stubs_{};
     std::array<uintptr_t, kSlots> vtbl_{};

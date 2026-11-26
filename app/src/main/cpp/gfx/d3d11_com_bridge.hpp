@@ -339,6 +339,7 @@ private:
           stubs_[Is].wrapper_ptr = reinterpret_cast<uint64_t>(&cpu::mobiro_native_thunk_wrapper),
           stubs_[Is].thunk_ptr = reinterpret_cast<uint64_t>(&dispatch_slot<Is>),
           vtable_ptrs_[Is] = reinterpret_cast<uintptr_t>(&stubs_[Is])), ...);
+        cpu::sync_box64_exec_region(stubs_.data(), sizeof(stubs_));
     }
 
     mutable std::mutex mu_;

@@ -304,10 +304,14 @@ Java_com_mobiro_runtime_MainActivity_nativeConfigureAndValidate(
                     dxvk_loaded ? 1 : 0,
                     g_rt.vk_driver.turnip_error.empty() ? "none" : g_rt.vk_driver.turnip_error.c_str());
 
-    // 5. Reserve Win64 guest VA arena & initialize Box64 thunk bridge
+    // 5. Reserve Win64 guest VA arena & initialize Box64 thunk bridge + memprot sync
     if (!g_rt.arena.reserve(0x0000000100000000ULL, 10ULL * 1024 * 1024 * 1024)) {
         return env->NewStringUTF("Failed to reserve low-47-bit guest VA arena.");
     }
+#ifdef MOBIRO_HAVE_BOX64
+    mobiro_box64_ensure_init();
+    g_rt.arena.set_prot_sync_hook(&mobiro_box64_set_prot);
+#endif
     if (!g_rt.box64.initialize(&g_rt.arena, &g_rt.vfs)) {
         return env->NewStringUTF("Failed to initialize Box64 native thunk bridge.");
     }
@@ -425,7 +429,8 @@ extern "C" void android_main(struct android_app* app) {
     while (!app->destroyRequested) {
         int events = 0;
         android_poll_source* source = nullptr;
-        while (ALooper_pollOnce(0, nullptr, &events, reinterpret_cast<void**>(&source)) >= 0) {
+        const int poll_ms = g_rt.guest_started.load(std::memory_order_relaxed) ? 4 : 16;
+        while (ALooper_pollOnce(poll_ms, nullptr, &events, reinterpret_cast<void**>(&source)) >= 0) {
             if (source) source->process(app, source);
         }
         process_game_activity_input(app);
