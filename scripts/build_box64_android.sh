@@ -45,7 +45,6 @@ fi
 LLVM_AR="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
 mapfile -t BOX64_OBJS < <(find "$BUILD_DIR/CMakeFiles" -type f -name "*.o" \
   ! -name "main.c.o" \
-  ! -path "*/test_interpreter.dir/*" \
   ! -path "*CompilerId*" \
   ! -path "*/CMakeTmp/*" | sort)
 if [ "${#BOX64_OBJS[@]}" -gt 0 ] && [ -x "$LLVM_AR" ]; then
