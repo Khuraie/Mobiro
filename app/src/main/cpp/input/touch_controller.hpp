@@ -32,7 +32,7 @@ struct HudQuad {
 // into InputRouter's lock-free XInput state for Sekiro combat pacing.
 class TouchController {
 public:
-    static constexpr size_t kMaxButtons = 10;
+    static constexpr size_t kMaxButtons = 13;
 
     TouchController() { reset_default_sekiro_layout(); }
 
@@ -42,7 +42,7 @@ public:
     }
 
     void reset_default_sekiro_layout() {
-        // Ergonomic landscape combat layout prioritizing instant L1 Deflect & R1 Attack
+        // Ergonomic landscape combat layout prioritizing instant L1 Deflect, R1 Attack & Healing Gourd (D-Pad Up)
         buttons_ = {{
             {"L1",  0.86f, 0.44f, 0.068f, kLeftShoulder,  false, false}, // Deflect / Guard
             {"R1",  0.76f, 0.58f, 0.068f, kRightShoulder, false, false}, // Attack
@@ -54,6 +54,9 @@ public:
             {"R2",  0.86f, 0.26f, 0.058f, 0,              false, true},  // Prosthetic Tool
             {"R3",  0.64f, 0.36f, 0.048f, kRightThumb,    false, false}, // Lock-On
             {"MNU", 0.50f, 0.08f, 0.045f, kStart,         false, false}, // Pause / Menu
+            {"UP",  0.25f, 0.22f, 0.052f, kDpadUp,        false, false}, // Use Quick Item / Healing Gourd
+            {"DN",  0.25f, 0.36f, 0.046f, kDpadDown,      false, false}, // Cycle Quick Item
+            {"L3",  0.14f, 0.48f, 0.048f, kLeftThumb,     false, false}, // Crouch / Stealth
         }};
         release_all();
     }

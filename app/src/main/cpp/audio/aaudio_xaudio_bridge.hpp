@@ -24,10 +24,15 @@ public:
         const size_t r = read_idx_.load(std::memory_order_acquire);
         const size_t avail = cap_ - (w - r);
         const size_t to_copy = std::min(count, avail);
-        for (size_t i = 0; i < to_copy; ++i) {
-            buf_[(w + i) & mask_] = samples[i];
+        if (to_copy > 0) {
+            const size_t pos = w & mask_;
+            const size_t first = std::min(to_copy, cap_ - pos);
+            std::memcpy(buf_.data() + pos, samples, first * sizeof(float));
+            if (to_copy > first) {
+                std::memcpy(buf_.data(), samples + first, (to_copy - first) * sizeof(float));
+            }
+            write_idx_.store(w + to_copy, std::memory_order_release);
         }
-        write_idx_.store(w + to_copy, std::memory_order_release);
         return to_copy;
     }
 
@@ -36,13 +41,18 @@ public:
         const size_t w = write_idx_.load(std::memory_order_acquire);
         const size_t avail = w - r;
         const size_t to_copy = std::min(count, avail);
-        for (size_t i = 0; i < to_copy; ++i) {
-            out[i] = buf_[(r + i) & mask_];
+        if (to_copy > 0) {
+            const size_t pos = r & mask_;
+            const size_t first = std::min(to_copy, cap_ - pos);
+            std::memcpy(out, buf_.data() + pos, first * sizeof(float));
+            if (to_copy > first) {
+                std::memcpy(out + first, buf_.data(), (to_copy - first) * sizeof(float));
+            }
+            read_idx_.store(r + to_copy, std::memory_order_release);
         }
         if (to_copy < count) {
             std::memset(out + to_copy, 0, (count - to_copy) * sizeof(float)); // Zero-fill underruns cleanly
         }
-        read_idx_.store(r + to_copy, std::memory_order_release);
         return to_copy;
     }
 

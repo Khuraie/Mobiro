@@ -1,6 +1,7 @@
 #undef NDEBUG
 #include "audio/aaudio_xaudio_bridge.hpp"
 #include "audio/xaudio2_com.hpp"
+#include "audio/xaudio2_com_bridge.hpp"
 #include "cpu_mem/box64_bridge.hpp"
 #include "cpu_mem/guest_arena.hpp"
 #include "cpu_mem/guest_executor.hpp"
@@ -691,10 +692,13 @@ void test_vfs_write_overlay_threads_wait_and_audio() {
     emu.rcx = reinterpret_cast<uint64_t>(&xa2_ptr);
     assert(bridge.invoke_thunk("xaudio2_7.dll", "XAudio2Create", &emu));
     assert(emu.rax == 0 && xa2_ptr != nullptr);
-    auto* xa2_com = static_cast<mobiro::audio::IXAudio2_7Com*>(xa2_ptr);
+    auto* xa2_pr = mobiro::audio::XAudio2ComBridge::global().find_proxy(reinterpret_cast<uintptr_t>(xa2_ptr));
+    assert(xa2_pr != nullptr && xa2_pr->native_obj != nullptr);
+    auto* xa2_com = static_cast<mobiro::audio::IXAudio2_7Com*>(xa2_pr->native_obj);
     uint32_t dev_count = 0;
     assert(xa2_com->lpVtbl->GetDeviceCount(xa2_com, &dev_count) == 0 && dev_count == 1);
     assert(xa2_com->lpVtbl->Release(xa2_com) == 0);
+    mobiro::audio::XAudio2ComBridge::global().clear();
 
     auto& audio = mobiro::audio::AAudioXAudioBridge::global();
     assert(audio.is_running());
@@ -726,9 +730,9 @@ void test_touch_controller_and_cache_warmer() {
     assert(snap.Gamepad.sThumbLX > 0 && snap.Gamepad.sThumbLY > 0);
     assert(snap.Gamepad.sThumbRX > 0);
 
-    // Active floating stick produces 10 button quads + 2 stick quads = 12 quads
+    // Active floating stick produces 13 button quads + 2 stick quads = 15 quads
     auto quads = tc.build_hud_quads();
-    assert(quads.size() == 12);
+    assert(quads.size() == 15);
 
     // Release camera & L1, then cancel clears left stick
     tc.on_pointer(2, mobiro::input::TouchAction::Up, 0.86f * 1920.0f, 0.44f * 1080.0f, router);
@@ -740,7 +744,7 @@ void test_touch_controller_and_cache_warmer() {
     tc.on_pointer(0, mobiro::input::TouchAction::Cancel, 0.0f, 0.0f, router);
     snap = router.snapshot();
     assert(snap.Gamepad.sThumbLX == 0 && snap.Gamepad.sThumbLY == 0);
-    assert(tc.build_hud_quads().size() == 10);
+    assert(tc.build_hud_quads().size() == 13);
 
     // 2. PipelineCacheWarmer: prunes stale build dirs & pre-reads active DXVK/Turnip cache files
     const fs::path cache_root = fs::temp_directory_path() / "mobiro_test_cache_warm";
@@ -779,7 +783,9 @@ void test_xaudio2_com_and_touch_overlay_vk() {
     assert(bridge.invoke_thunk("xaudio2_9.dll", "XAudio2Create", &emu));
     assert(emu.rax == 0 && xa2_raw != nullptr);
 
-    auto* xa2 = static_cast<mobiro::audio::IXAudio2Com*>(xa2_raw);
+    auto* xa2_proxy = mobiro::audio::XAudio2ComBridge::global().find_proxy(reinterpret_cast<uintptr_t>(xa2_raw));
+    assert(xa2_proxy != nullptr && xa2_proxy->native_obj != nullptr);
+    auto* xa2 = static_cast<mobiro::audio::IXAudio2Com*>(xa2_proxy->native_obj);
     assert(xa2->lpVtbl->AddRef(xa2) == 2);
 
     void* master_raw = nullptr;
@@ -846,20 +852,21 @@ void test_xaudio2_com_and_touch_overlay_vk() {
     master->lpVtbl->DestroyVoice(master);
     assert(xa2->lpVtbl->Release(xa2) == 1);
     assert(xa2->lpVtbl->Release(xa2) == 0);
+    mobiro::audio::XAudio2ComBridge::global().clear();
     aaudio.stop();
     bridge.shutdown();
 
-    // 2. TouchOverlayVk: 12 quads -> 72 NDC vertices, auto-hides when controller disables overlay
+    // 2. TouchOverlayVk: 15 quads -> 90 NDC vertices, auto-hides when controller disables overlay
     mobiro::input::InputRouter router;
     mobiro::input::TouchController tc;
     tc.set_viewport(1920.0f, 1080.0f);
     tc.on_pointer(1, mobiro::input::TouchAction::Down, 300.0f, 700.0f, router);
     auto quads = tc.build_hud_quads();
-    assert(quads.size() == 12);
+    assert(quads.size() == 15);
 
     mobiro::gfx::TouchOverlayVk overlay;
-    assert(overlay.pack_quads(quads) == 72);
-    assert(overlay.vertex_bytes() == 72 * sizeof(mobiro::gfx::HudVertex));
+    assert(overlay.pack_quads(quads) == 90);
+    assert(overlay.vertex_bytes() == 90 * sizeof(mobiro::gfx::HudVertex));
     for (const auto& v : overlay.vertices()) {
         assert(v.x >= -1.0f && v.x <= 1.0f);
         assert(v.y >= -1.0f && v.y <= 1.0f);
@@ -887,7 +894,9 @@ void test_xaudio2_com_and_touch_overlay_vk() {
     e2.rcx = reinterpret_cast<uint64_t>(&xa27_raw);
     assert(b2.invoke_thunk("xaudio2_7.dll", "XAudio2Create", &e2));
     assert(e2.rax == 0 && xa27_raw != nullptr);
-    auto* xa27 = static_cast<mobiro::audio::IXAudio2_7Com*>(xa27_raw);
+    auto* xa27_proxy = mobiro::audio::XAudio2ComBridge::global().find_proxy(reinterpret_cast<uintptr_t>(xa27_raw));
+    assert(xa27_proxy != nullptr && xa27_proxy->native_obj != nullptr);
+    auto* xa27 = static_cast<mobiro::audio::IXAudio2_7Com*>(xa27_proxy->native_obj);
     assert(xa27->lpVtbl->Initialize(xa27, 0, 0) == 0);
 
     mobiro::audio::WaveFormatEx fmt24{};
@@ -908,6 +917,7 @@ void test_xaudio2_com_and_touch_overlay_vk() {
     assert(std::abs(resamp[0] - 0.0f) < 1e-4f && std::abs(resamp[2] - 0.5f) < 1e-4f && std::abs(resamp[4] - 1.0f) < 1e-4f);
     v24->lpVtbl->base.DestroyVoice(v24);
     assert(xa27->lpVtbl->Release(xa27) == 0);
+    mobiro::audio::XAudio2ComBridge::global().clear();
     aaudio.stop();
 
     // CriticalSection (recursive), FileTime, TickCount64, StartupInfoW, CommandLine, CPU features
@@ -1149,7 +1159,7 @@ void test_d3d11_com_bridge_ext_win32_and_hud_draw() {
     mobiro::input::TouchController tc;
     auto quads = tc.build_hud_quads();
     mobiro::gfx::TouchOverlayVk overlay;
-    assert(overlay.pack_quads(quads) == 60);
+    assert(overlay.pack_quads(quads) == 78);
 
     std::vector<uint8_t> mapped_vbo(4096, 0);
     static uint32_t drawn_vtx_count = 0;
@@ -1164,7 +1174,7 @@ void test_d3d11_com_bridge_ext_win32_and_hud_draw() {
     db.cmd_draw = [](void*, uint32_t vtx, uint32_t, uint32_t, uint32_t) { drawn_vtx_count = vtx; };
     overlay.attach_draw_bindings(db);
     int fake_cmd = 1;
-    assert(overlay.record_draw_commands(&fake_cmd) && drawn_vtx_count == 60);
+    assert(overlay.record_draw_commands(&fake_cmd) && drawn_vtx_count == 78);
 
     // 3. Extended Win32 shims (MultiByteToWideChar, GlobalMemoryStatusEx, EncodePointer, DirectInput8)
     mobiro::mem::GuestArena arena;
@@ -2036,6 +2046,105 @@ void test_m16_init_once_slist_time_query_and_xinput_caps() {
     bridge.shutdown();
 }
 
+void test_m17_xaudio2_onebridge_ring_and_gourd_touch() {
+    auto& xa_br = mobiro::audio::XAudio2ComBridge::global();
+    xa_br.clear();
+    auto& aaudio = mobiro::audio::AAudioXAudioBridge::global();
+    aaudio.stop();
+
+    // 1. End-to-end Win64 Box64 onebridge_t XAudio2.9 dispatch (including XMM1 SetVolume + 5.1 EXTENSIBLE downmix)
+    mobiro::mem::GuestArena arena;
+    assert(arena.reserve(0x0000000100000000ULL, 128ULL * 1024 * 1024));
+    mobiro::validator::VfsMapper vfs;
+    mobiro::cpu::Box64Bridge bridge;
+    assert(bridge.initialize(&arena, &vfs));
+
+    auto invoke_xa = [](mobiro::audio::XAudioProxyObject* pr, size_t slot, x64emu_t& e) {
+        e.rcx = reinterpret_cast<uint64_t>(pr);
+        const auto* st = reinterpret_cast<const mobiro::cpu::NativeBridgeStub*>(pr->lpVtbl[slot]);
+        assert(st->trap_cc == 0xCC && st->magic[0] == 'S' && st->magic[1] == 'C');
+        reinterpret_cast<void(*)(x64emu_t*, uintptr_t)>(st->wrapper_ptr)(&e, static_cast<uintptr_t>(st->thunk_ptr));
+    };
+
+    void* xa_guest = nullptr;
+    x64emu_t emu{};
+    emu.rcx = reinterpret_cast<uint64_t>(&xa_guest);
+    assert(bridge.invoke_thunk("xaudio2_9.dll", "XAudio2Create", &emu) && emu.rax == 0);
+    auto* xa_p = xa_br.find_proxy(reinterpret_cast<uintptr_t>(xa_guest));
+    assert(xa_p != nullptr && xa_br.active_proxy_count() == 1);
+
+    // CreateMasteringVoice (slot 7) -> auto-wraps mastering voice proxy
+    void* mv_guest = nullptr;
+    emu = {}; emu.rdx = reinterpret_cast<uint64_t>(&mv_guest); emu.r8 = 2; emu.r9 = 48000;
+    invoke_xa(xa_p, 7, emu);
+    auto* mv_p = xa_br.find_proxy(reinterpret_cast<uintptr_t>(mv_guest));
+    assert(emu.rax == 0 && mv_p != nullptr);
+
+    // CreateSourceVoice (slot 5) with 6-channel WAVE_FORMAT_EXTENSIBLE (0xFFFE) float32 -> auto-wraps voice proxy
+    mobiro::audio::WaveFormatEx fmt51{};
+    fmt51.format_tag = 0xFFFEu;
+    fmt51.channels = 6;
+    fmt51.samples_per_sec = 48000;
+    fmt51.bits_per_sample = 32;
+    void* sv_guest = nullptr;
+    emu = {}; emu.rdx = reinterpret_cast<uint64_t>(&sv_guest); emu.r8 = reinterpret_cast<uint64_t>(&fmt51);
+    invoke_xa(xa_p, 5, emu);
+    auto* sv_p = xa_br.find_proxy(reinterpret_cast<uintptr_t>(sv_guest));
+    assert(emu.rax == 0 && sv_p != nullptr && xa_br.active_proxy_count() == 3);
+
+    // SetVolume (slot 12) via XMM1 = 0.5f
+    emu = {};
+    mobiro::cpu::emu_set_xmm_f32(&emu, 1, 0.5f);
+    invoke_xa(sv_p, 12, emu);
+    assert(emu.rax == 0);
+
+    // SubmitSourceBuffer (slot 21): 1 frame of 6-ch audio (L=0.4, R=0.8, C=0.0, ...) * 0.5 gain -> L=0.2, R=0.4
+    const float frame51[6] = {0.4f, 0.8f, 0.0f, 0.0f, 0.0f, 0.0f};
+    mobiro::audio::XAudio2Buffer xbuf{};
+    xbuf.audio_bytes = sizeof(frame51);
+    xbuf.audio_data = reinterpret_cast<const uint8_t*>(frame51);
+    emu = {}; emu.rdx = reinterpret_cast<uint64_t>(&xbuf);
+    invoke_xa(sv_p, 21, emu);
+    assert(emu.rax == 0);
+
+    float drained[2]{};
+    assert(aaudio.drain_pcm_float(drained, 2) == 2);
+    assert(std::abs(drained[0] - 0.2f) < 1e-4f && std::abs(drained[1] - 0.4f) < 1e-4f);
+
+    // DestroyVoice (slot 18) + Release (slot 2) reclaim all proxies automatically
+    emu = {}; invoke_xa(sv_p, 18, emu);
+    emu = {}; invoke_xa(mv_p, 18, emu);
+    emu = {}; invoke_xa(xa_p, 2, emu);
+    assert(xa_br.active_proxy_count() == 0);
+    aaudio.stop();
+
+    // 2. PcmRingBuffer wrap-around bulk memcpy integrity
+    mobiro::audio::PcmRingBuffer ring(16);
+    float in10[10] = {1,2,3,4,5,6,7,8,9,10};
+    float out10[10]{};
+    assert(ring.write(in10, 10) == 10 && ring.read(out10, 10) == 10);
+    assert(ring.write(in10, 10) == 10 && ring.read(out10, 10) == 10); // wraps across end->0 boundary
+    assert(out10[0] == 1.0f && out10[9] == 10.0f);
+
+    // 3. TouchController Healing Gourd (D-Pad Up), Crouch (L3) & camera look decay
+    mobiro::input::InputRouter router;
+    mobiro::input::TouchController tc;
+    tc.set_viewport(1920.0f, 1080.0f);
+    tc.on_pointer(10, mobiro::input::TouchAction::Down, 0.25f * 1920.0f, 0.22f * 1080.0f, router); // D-Pad Up (Gourd)
+    tc.on_pointer(11, mobiro::input::TouchAction::Down, 0.14f * 1920.0f, 0.48f * 1080.0f, router); // L3 (Crouch)
+    auto snap = router.snapshot();
+    assert((snap.Gamepad.wButtons & mobiro::input::kDpadUp) != 0);
+    assert((snap.Gamepad.wButtons & mobiro::input::kLeftThumb) != 0);
+
+    tc.on_pointer(12, mobiro::input::TouchAction::Down, 0.55f * 1920.0f, 0.50f * 1080.0f, router);
+    tc.on_pointer(12, mobiro::input::TouchAction::Move, 0.60f * 1920.0f, 0.50f * 1080.0f, router);
+    assert(router.snapshot().Gamepad.sThumbRX > 0);
+    tc.decay_camera_look(router);
+    assert(router.snapshot().Gamepad.sThumbRX == 0);
+
+    bridge.shutdown();
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -2067,6 +2176,7 @@ int main(int argc, char** argv) {
     test_m14_lockfree_com_pool_pacer_and_native_crt_mem();
     test_m15_segregated_heap_sharded_sync_and_parallel_io();
     test_m16_init_once_slist_time_query_and_xinput_caps();
+    test_m17_xaudio2_onebridge_ring_and_gourd_touch();
     std::cout << "All Mobiro core unit tests passed.\n";
     return 0;
 }

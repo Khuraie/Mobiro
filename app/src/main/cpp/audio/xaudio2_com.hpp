@@ -150,6 +150,8 @@ struct IXAudio2SourceVoiceCom {
     uint64_t samples_played = 0;
     void* last_context = nullptr;
     AAudioXAudioBridge* bridge = nullptr;
+    std::vector<float> scratch_stereo;
+    std::vector<float> scratch_resampled;
 };
 
 struct IXAudio2Com {
@@ -236,7 +238,9 @@ inline int32_t source_set_rate(void* self, uint32_t rate) {
     return 0;
 }
 
-// Converts PCM16 or IEEE float32 (mono or stereo), linearly resamples if needed, and pushes into AAudioXAudioBridge.
+// Converts PCM16 or IEEE float32 (including WAVE_FORMAT_EXTENSIBLE / multichannel downmix),
+// linearly resamples into reusable per-voice scratch buffers (zero heap allocs in steady state),
+// and pushes directly into AAudioXAudioBridge.
 inline int32_t source_submit_buffer(void* self, const XAudio2Buffer* buf, const void*) {
     if (!self || !buf || !buf->audio_data || buf->audio_bytes == 0) {
         return static_cast<int32_t>(0x80070057u); // E_INVALIDARG
@@ -244,11 +248,15 @@ inline int32_t source_submit_buffer(void* self, const XAudio2Buffer* buf, const 
     auto* v = static_cast<IXAudio2SourceVoiceCom*>(self);
     v->last_context = buf->context;
 
-    const uint16_t ch = (v->format.channels == 1) ? 1u : 2u;
+    const uint16_t ch = v->format.channels ? v->format.channels : 2u;
     const float gain = v->volume;
-    std::vector<float> stereo;
+    auto& stereo = v->scratch_stereo;
+    const bool is_pcm16 = (v->format.bits_per_sample == 16) &&
+                          (v->format.format_tag == 1 || v->format.format_tag == 0xFFFEu);
+    const bool is_f32   = (v->format.bits_per_sample == 32) &&
+                          (v->format.format_tag == 3 || v->format.format_tag == 0xFFFEu);
 
-    if (v->format.format_tag == 1 && v->format.bits_per_sample == 16) {
+    if (is_pcm16) {
         const size_t total_samples = buf->audio_bytes / sizeof(int16_t);
         const size_t frames = total_samples / ch;
         stereo.resize(frames * 2);
@@ -260,12 +268,15 @@ inline int32_t source_submit_buffer(void* self, const XAudio2Buffer* buf, const 
                 stereo[i * 2 + 0] = s;
                 stereo[i * 2 + 1] = s;
             } else {
-                stereo[i * 2 + 0] = std::clamp(static_cast<float>(src[i * 2 + 0]) * kScale * gain, -1.0f, 1.0f);
-                stereo[i * 2 + 1] = std::clamp(static_cast<float>(src[i * 2 + 1]) * kScale * gain, -1.0f, 1.0f);
+                const float l = static_cast<float>(src[i * ch + 0]) * kScale;
+                const float r = static_cast<float>(src[i * ch + 1]) * kScale;
+                const float c = (ch >= 3) ? (static_cast<float>(src[i * ch + 2]) * kScale * 0.707f) : 0.0f;
+                stereo[i * 2 + 0] = std::clamp((l + c) * gain, -1.0f, 1.0f);
+                stereo[i * 2 + 1] = std::clamp((r + c) * gain, -1.0f, 1.0f);
             }
         }
         v->samples_played += frames;
-    } else if (v->format.format_tag == 3 && v->format.bits_per_sample == 32) {
+    } else if (is_f32) {
         const size_t total_samples = buf->audio_bytes / sizeof(float);
         const size_t frames = total_samples / ch;
         stereo.resize(frames * 2);
@@ -276,8 +287,11 @@ inline int32_t source_submit_buffer(void* self, const XAudio2Buffer* buf, const 
                 stereo[i * 2 + 0] = s;
                 stereo[i * 2 + 1] = s;
             } else {
-                stereo[i * 2 + 0] = std::clamp(src[i * 2 + 0] * gain, -1.0f, 1.0f);
-                stereo[i * 2 + 1] = std::clamp(src[i * 2 + 1] * gain, -1.0f, 1.0f);
+                const float l = src[i * ch + 0];
+                const float r = src[i * ch + 1];
+                const float c = (ch >= 3) ? (src[i * ch + 2] * 0.707f) : 0.0f;
+                stereo[i * 2 + 0] = std::clamp((l + c) * gain, -1.0f, 1.0f);
+                stereo[i * 2 + 1] = std::clamp((r + c) * gain, -1.0f, 1.0f);
             }
         }
         v->samples_played += frames;
@@ -292,7 +306,8 @@ inline int32_t source_submit_buffer(void* self, const XAudio2Buffer* buf, const 
             const size_t src_frames = stereo.size() / 2;
             const size_t dst_frames = std::max<size_t>(
                 1, static_cast<size_t>((static_cast<uint64_t>(src_frames) * dst_rate) / src_rate));
-            std::vector<float> resampled(dst_frames * 2);
+            auto& resampled = v->scratch_resampled;
+            resampled.resize(dst_frames * 2);
             const double step = static_cast<double>(src_rate) / static_cast<double>(dst_rate);
             for (size_t i = 0; i < dst_frames; ++i) {
                 const double pos = i * step;

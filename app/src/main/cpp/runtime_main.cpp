@@ -81,6 +81,7 @@ void process_game_activity_input(android_app* app) {
         }
     }
 
+    bool saw_touch_move = false;
     for (uint64_t i = 0; i < buf->motionEventsCount; ++i) {
         const auto& ev = buf->motionEvents[i];
         if ((ev.source & AINPUT_SOURCE_JOYSTICK) == AINPUT_SOURCE_JOYSTICK && ev.pointerCount > 0) {
@@ -115,6 +116,7 @@ void process_game_activity_input(android_app* app) {
                         GameActivityPointerAxes_getX(&p), GameActivityPointerAxes_getY(&p), router);
                 }
             } else if (masked == AMOTION_EVENT_ACTION_MOVE) {
+                saw_touch_move = true;
                 for (uint32_t k = 0; k < ev.pointerCount; ++k) {
                     const auto& p = ev.pointers[k];
                     g_rt.touch_ctrl.on_pointer(
@@ -125,6 +127,9 @@ void process_game_activity_input(android_app* app) {
                 g_rt.touch_ctrl.on_pointer(0, mobiro::input::TouchAction::Cancel, 0.0f, 0.0f, router);
             }
         }
+    }
+    if (!saw_touch_move) {
+        g_rt.touch_ctrl.decay_camera_look(router);
     }
 
     android_app_clear_key_events(buf);

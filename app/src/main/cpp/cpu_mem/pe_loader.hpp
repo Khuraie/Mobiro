@@ -14,6 +14,12 @@
 
 namespace mobiro::cpu {
 
+struct DepDllInitEntry {
+    uintptr_t mapped_base = 0;
+    uintptr_t entry_point = 0;
+    uintptr_t tls_dir_va = 0;
+};
+
 struct LoadedPeImage {
     bool ok = false;
     std::string error;
@@ -27,6 +33,7 @@ struct LoadedPeImage {
     size_t relocations_applied = 0;
     size_t imports_resolved = 0;
     std::vector<std::string> unresolved_imports;
+    std::vector<DepDllInitEntry> dep_dlls; // Topological init order for auto-loaded BYOF DLLs
     std::unordered_map<std::string, uintptr_t> exports_by_name;
     std::unordered_map<uint16_t, uintptr_t> exports_by_ordinal;
 };
@@ -215,6 +222,10 @@ private:
                             if (dep.pdata_va && dep.pdata_size) {
                                 bridge.seh().register_image(dep.mapped_base, dep.pdata_va, dep.pdata_size);
                             }
+                            for (const auto& sub : dep.dep_dlls) res.dep_dlls.push_back(sub);
+                            if (dep.entry_point != dep.mapped_base || dep.tls_dir_va) {
+                                res.dep_dlls.push_back({dep.mapped_base, dep.entry_point, dep.tls_dir_va});
+                            }
                             bridge.modules().register_guest_module(
                                 dll_name, dep.mapped_base, dep.image_size,
                                 std::move(dep.exports_by_name), std::move(dep.exports_by_ordinal));
@@ -272,11 +283,29 @@ private:
             const uint32_t names_rva  = rd32(ed + 32);
             const uint32_t ords_rva   = rd32(ed + 36);
 
+            auto resolve_export_rva = [&](uint32_t fn_rva) -> uintptr_t {
+                if (fn_rva == 0 || fn_rva >= size_of_image) return 0;
+                // Forwarded export: RVA falls inside [exp_rva, exp_rva + exp_sz) and names "DLL.Symbol"
+                if (fn_rva >= exp_rva && fn_rva < exp_rva + exp_sz) {
+                    const std::string fwd(reinterpret_cast<const char*>(base_ptr + fn_rva));
+                    const size_t dot = fwd.find('.');
+                    if (dot != std::string::npos && dot + 1 < fwd.size()) {
+                        const std::string target_dll = fwd.substr(0, dot) + ".dll";
+                        const std::string target_sym = fwd.substr(dot + 1);
+                        uintptr_t dst = bridge.resolve_import(target_dll, target_sym);
+                        if (!dst) dst = bridge.modules().resolve_guest_export_by_dll(target_dll, target_sym);
+                        return dst;
+                    }
+                    return 0;
+                }
+                return target_va + fn_rva;
+            };
+
             if (funcs_rva && funcs_rva + num_funcs * 4 <= size_of_image) {
                 for (uint32_t i = 0; i < num_funcs; ++i) {
-                    const uint32_t fn_rva = rd32(base_ptr + funcs_rva + i * 4);
-                    if (fn_rva != 0 && fn_rva < size_of_image) {
-                        res.exports_by_ordinal[static_cast<uint16_t>(ord_base + i)] = target_va + fn_rva;
+                    const uintptr_t addr = resolve_export_rva(rd32(base_ptr + funcs_rva + i * 4));
+                    if (addr) {
+                        res.exports_by_ordinal[static_cast<uint16_t>(ord_base + i)] = addr;
                     }
                 }
                 if (names_rva && ords_rva &&
@@ -286,10 +315,10 @@ private:
                         const uint32_t sym_rva = rd32(base_ptr + names_rva + i * 4);
                         const uint16_t ord_idx = rd16(base_ptr + ords_rva + i * 2);
                         if (sym_rva < size_of_image && ord_idx < num_funcs) {
-                            const uint32_t fn_rva = rd32(base_ptr + funcs_rva + ord_idx * 4);
-                            if (fn_rva != 0 && fn_rva < size_of_image) {
+                            const uintptr_t addr = resolve_export_rva(rd32(base_ptr + funcs_rva + ord_idx * 4));
+                            if (addr) {
                                 const std::string sym(reinterpret_cast<const char*>(base_ptr + sym_rva));
-                                res.exports_by_name[sym] = target_va + fn_rva;
+                                res.exports_by_name[sym] = addr;
                             }
                         }
                     }

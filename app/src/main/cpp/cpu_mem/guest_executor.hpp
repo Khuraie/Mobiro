@@ -92,6 +92,19 @@ public:
             res.error = "Invalid PE image.";
             return res;
         }
+        // Initialize auto-loaded BYOF dependent DLLs (e.g. oo2core_6_win64.dll, bink2w64.dll)
+        for (const auto& dep : img.dep_dlls) {
+            if (dep.tls_dir_va) {
+                LoadedPeImage tmp{};
+                tmp.ok = true;
+                tmp.mapped_base = dep.mapped_base;
+                tmp.tls_dir_va = dep.tls_dir_va;
+                run_tls_callbacks(tmp, tenv);
+            }
+            if (dep.entry_point && dep.entry_point != dep.mapped_base) {
+                (void)call_guest_fn(dep.entry_point, dep.mapped_base, 1ULL, 0ULL, tenv, max_steps);
+            }
+        }
         run_tls_callbacks(img, tenv);
         return call_guest_fn(img.entry_point, img.mapped_base, 1ULL, 0ULL, tenv, max_steps);
     }

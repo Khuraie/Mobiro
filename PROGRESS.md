@@ -6,6 +6,17 @@
 
 ## Log Entries
 
+### Increment 19 — M17: XAudio2 Box64 `onebridge_t` COM Bridge, Zero-Alloc Audio Ring, PE64 Forwarded Exports/`DllMain` & Healing-Gourd Touch + Camera Decay (2026-11-27)
+- **Status:** Implemented & verified (local MSVC 2022 + GitHub Actions Linux GCC/`spirv-val` + Android ARM64 NDK)
+- **Changes:**
+  - Fixed a critical ARM64 Box64 audio ABI bug by implementing `XAudio2ComBridge` (`app/src/main/cpp/audio/xaudio2_com_bridge.hpp`), wrapping `IXAudio2`, `IXAudio2_7`, `IXAudio2Voice`, and `IXAudio2SourceVoice` in lock-free 32-byte Box64 `onebridge_t` (`NativeBridgeStub`) COM proxies with `XMM1` float forwarding (`SetVolume`, `SetFrequencyRatio`), automatic voice out-param wrapping, and proxy cleanup on `DestroyVoice`/`Release == 0`; wired directly into `thunk_XAudio2Create_27`/`29` (`win32_shim.cpp`).
+  - Eliminated per-submit heap allocations in `IXAudio2SourceVoiceCom::source_submit_buffer` (`xaudio2_com.hpp`) via reusable per-voice scratch buffers, added `WAVE_FORMAT_EXTENSIBLE` (`0xFFFE`) & multichannel (5.1/7.1 -> stereo) downmix support, and upgraded `PcmRingBuffer` (`aaudio_xaudio_bridge.hpp`) to contiguous bulk `std::memcpy` wrap transfers.
+  - Upgraded `PeLoader` (`pe_loader.hpp`) + `GuestExecutor::run_entry` (`guest_executor.hpp`) to resolve forwarded PE exports (`"DLL.Symbol"`) cleanly instead of returning ASCII string pointers and to run `TLS` callbacks + `DllMain(DLL_PROCESS_ATTACH)` for all auto-loaded dependent BYOF DLLs in topological order before entering `Sekiro.exe`.
+  - Added Healing Gourd (`D-Pad Up`), Item Cycle (`D-Pad Down`), and Crouch/Stealth (`L3`) to `TouchController` (`touch_controller.hpp`) and wired `decay_camera_look()` in `runtime_main.cpp` so touch camera stops immediately when thumb movement stops.
+  - Added `test_m17_xaudio2_onebridge_ring_and_gourd_touch` in `tests/test_core.cpp` (18/18 test suites passing).
+
+---
+
 ### Increment 18 — M16: Box64 `LoadEnvVariables()` Dynarec Activation, Live DXVK In-Swapchain Touch HUD Renderer & Sekiro CRT/SList/InitOnce Shims (2026-11-27)
 - **Status:** Implemented & verified (local MSVC 2022 + GitHub Actions Linux GCC/`spirv-val` + Android ARM64 NDK)
 - **Changes:**

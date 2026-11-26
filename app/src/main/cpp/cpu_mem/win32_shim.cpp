@@ -2,7 +2,8 @@
 #include "guest_executor.hpp"
 #include "pe_loader.hpp"
 #include "win32_ext_shims.hpp"
-#include "../audio/xaudio2_com.hpp"
+#include "../audio/aaudio_xaudio_bridge.hpp"
+#include "../audio/xaudio2_com_bridge.hpp"
 #include "../gfx/d3d11_com_bridge.hpp"
 #include "../gfx/dxvk_interop.hpp"
 #include "../input/input_router.hpp"
@@ -287,12 +288,18 @@ void thunk_WakeByAddressAll(x64emu_t* emu) {
 void thunk_XAudio2Create_27(x64emu_t* emu) {
     auto** out_xa2 = reinterpret_cast<void**>(reg_rcx(emu));
     const int32_t hr = mobiro::audio::create_xaudio2_com(out_xa2, /*legacy_2_7=*/true);
+    if (hr >= 0 && out_xa2 && *out_xa2) {
+        *out_xa2 = mobiro::audio::XAudio2ComBridge::global().wrap(*out_xa2, mobiro::audio::XAudioIfaceId::IXAudio2_7);
+    }
     reg_rax(emu) = static_cast<uint64_t>(static_cast<uint32_t>(hr));
 }
 
 void thunk_XAudio2Create_29(x64emu_t* emu) {
     auto** out_xa2 = reinterpret_cast<void**>(reg_rcx(emu));
     const int32_t hr = mobiro::audio::create_xaudio2_com(out_xa2, /*legacy_2_7=*/false);
+    if (hr >= 0 && out_xa2 && *out_xa2) {
+        *out_xa2 = mobiro::audio::XAudio2ComBridge::global().wrap(*out_xa2, mobiro::audio::XAudioIfaceId::IXAudio2);
+    }
     reg_rax(emu) = static_cast<uint64_t>(static_cast<uint32_t>(hr));
 }
 
