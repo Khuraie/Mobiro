@@ -81,6 +81,13 @@ jobs:
         with:
           gradle-version: 8.10.2
 
+      - name: Cache Stable Android Debug Keystore
+        if: ${{ inputs.assemble_bundled_apk }}
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: mobiro-debug-keystore-v1
+
       - name: Assemble Bundled Debug APK (arm64-v8a)
         if: ${{ inputs.assemble_bundled_apk }}
         run: gradle :app:assembleDebug --no-daemon

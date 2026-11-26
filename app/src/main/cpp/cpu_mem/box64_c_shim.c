@@ -1,14 +1,20 @@
 // Pure C11 shim insulating Mobiro's C++20 runtime from upstream Box64 internal C headers.
 #include "box64context.h"
 #include "box64cpu.h"
+#include "debug.h"
 #include "env.h"
+#include "hostext.h"
+#include "sysinfo.h"
 #include "x64emu.h"
 #include "emu/x64emu_private.h"
 
+#include <android/log.h>
 #include <pthread.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 uint64_t* mobiro_box64_reg_ptr(x64emu_t* emu, int reg_id) {
     if (!emu || reg_id < 0 || reg_id >= 16) return NULL;
@@ -37,9 +43,19 @@ static pthread_once_t g_box64_ctx_once = PTHREAD_ONCE_INIT;
 
 static void mobiro_init_box64_context_once(void) {
     if (!my_context) {
-        // Must parse BOX64_DYNAREC* env vars before NewBox64Context since main.c.o is excluded
+        // Mirror upstream Box64 core.c::initialize() prerequisites since main.c.o is excluded
+        ftrace = stderr;
+        box64_pagesize = (uintptr_t)sysconf(_SC_PAGESIZE);
+        if (!box64_pagesize) box64_pagesize = 4096;
         LoadEnvVariables();
+        InitializeSystemInfo();
+#ifdef DYNAREC
+        DetectHostCpuFeatures();
+#endif
         my_context = NewBox64Context(0);
+        __android_log_print(ANDROID_LOG_WARN, "Mobiro",
+                            "Box64 context ready (pagesize=%zu, dynarec=%d, ctx=%p)",
+                            (size_t)box64_pagesize, BOX64ENV(dynarec), (void*)my_context);
     }
 }
 
@@ -63,7 +79,9 @@ int mobiro_box64_call_fn(uintptr_t fn_va,
 
     uint64_t rsp = ((uint64_t)stack_base - 0x100ULL) & ~0xFULL;
     rsp -= 8;
-    const uint64_t exit_addr = (uint64_t)(uintptr_t)g_box64_exit_stub;
+    const uint64_t exit_addr = my_context->exit_bridge
+        ? (uint64_t)my_context->exit_bridge
+        : (uint64_t)(uintptr_t)g_box64_exit_stub;
     memcpy((void*)(uintptr_t)rsp, &exit_addr, 8);
 
     emu->regs[_SP].q[0] = rsp;

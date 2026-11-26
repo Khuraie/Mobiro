@@ -22,8 +22,11 @@
 #include <sys/sysinfo.h>
 
 #include <atomic>
+#include <cstdarg>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -47,9 +50,28 @@ struct MobiroRuntimeState {
     std::atomic<bool> dxvk_loaded{false};
     std::atomic<bool> guest_started{false};
     std::thread guest_thread;
+    std::mutex log_mu;
+    std::string boot_log_path;
 };
 
 MobiroRuntimeState g_rt;
+
+void mobiro_boot_log(const char* fmt, ...) {
+    char buf[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    std::vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    __android_log_print(ANDROID_LOG_WARN, kLogTag, "%s", buf);
+    std::lock_guard<std::mutex> lock(g_rt.log_mu);
+    if (!g_rt.boot_log_path.empty()) {
+        if (FILE* f = std::fopen(g_rt.boot_log_path.c_str(), "a")) {
+            std::fprintf(f, "%s\n", buf);
+            std::fflush(f);
+            std::fclose(f);
+        }
+    }
+}
 
 uint64_t query_total_ram_mb() {
     struct sysinfo si{};
@@ -203,9 +225,21 @@ Java_com_mobiro_runtime_MainActivity_nativeConfigureAndValidate(
     env->ReleaseStringUTFChars(jCacheDir, c_cache);
     env->ReleaseStringUTFChars(jNativeLibDir, c_libs);
 
+    {
+        std::lock_guard<std::mutex> lock(g_rt.log_mu);
+        g_rt.boot_log_path = (std::filesystem::path(game_dir).parent_path() / "mobiro_boot.log").string();
+        if (FILE* f = std::fopen(g_rt.boot_log_path.c_str(), "w")) {
+            std::fprintf(f, "=== Mobiro Boot Log ===\n");
+            std::fflush(f);
+            std::fclose(f);
+        }
+    }
+    mobiro_boot_log("Configure start: game_dir=%s lib_dir=%s", game_dir.c_str(), lib_dir.c_str());
+
     // 1. Clean-room BYOF validation (PE32+ header + Data0..5 .bhd/.bdt BDF4 magic)
     auto report = mobiro::validator::validate_byof_directory(game_dir, g_rt.vfs);
     if (!report.ok) {
+        mobiro_boot_log("BYOF validation failed: %s", report.error.c_str());
         return env->NewStringUTF(report.error.c_str());
     }
 
@@ -261,10 +295,10 @@ Java_com_mobiro_runtime_MainActivity_nativeConfigureAndValidate(
             const int64_t work_ns = mobiro::gfx::DxvkInterop::global().pace_present();
             if (work_ns > 0) g_rt.balancer.report_frame_work(work_ns);
         });
-    __android_log_print(ANDROID_LOG_INFO, kLogTag, "Vulkan ICD loaded: %s (turnip=%d, dxvk_native=%d)",
-                        g_rt.vk_driver.loaded_path.c_str(),
-                        g_rt.vk_driver.using_turnip ? 1 : 0,
-                        dxvk_loaded ? 1 : 0);
+    mobiro_boot_log("Vulkan ICD loaded: %s (turnip=%d, dxvk_native=%d)",
+                    g_rt.vk_driver.loaded_path.c_str(),
+                    g_rt.vk_driver.using_turnip ? 1 : 0,
+                    dxvk_loaded ? 1 : 0);
 
     // 5. Reserve Win64 guest VA arena & initialize Box64 thunk bridge
     if (!g_rt.arena.reserve(0x0000000100000000ULL, 10ULL * 1024 * 1024 * 1024)) {
@@ -300,16 +334,14 @@ Java_com_mobiro_runtime_MainActivity_nativeConfigureAndValidate(
     g_rt.box64.set_main_thread_env(&g_rt.main_thread_env);
 
     g_rt.configured.store(true, std::memory_order_release);
-    __android_log_print(ANDROID_LOG_INFO, kLogTag,
-                        "Mobiro mapped PE64: base=0x%llx ep=0x%llx relocs=%zu iat_ok=%zu iat_missing=%zu",
-                        static_cast<unsigned long long>(g_rt.pe_image.mapped_base),
-                        static_cast<unsigned long long>(g_rt.pe_image.entry_point),
-                        g_rt.pe_image.relocations_applied,
-                        g_rt.pe_image.imports_resolved,
-                        g_rt.pe_image.unresolved_imports.size());
+    mobiro_boot_log("Mobiro mapped PE64: base=0x%llx ep=0x%llx relocs=%zu iat_ok=%zu iat_missing=%zu",
+                    static_cast<unsigned long long>(g_rt.pe_image.mapped_base),
+                    static_cast<unsigned long long>(g_rt.pe_image.entry_point),
+                    g_rt.pe_image.relocations_applied,
+                    g_rt.pe_image.imports_resolved,
+                    g_rt.pe_image.unresolved_imports.size());
     for (size_t i = 0; i < g_rt.pe_image.unresolved_imports.size() && i < 64; ++i) {
-        __android_log_print(ANDROID_LOG_WARN, kLogTag, "  unresolved IAT[%zu]: %s",
-                            i, g_rt.pe_image.unresolved_imports[i].c_str());
+        mobiro_boot_log("  unresolved IAT[%zu]: %s", i, g_rt.pe_image.unresolved_imports[i].c_str());
     }
     return env->NewStringUTF("");
 }
@@ -369,15 +401,14 @@ void handle_app_cmd(android_app* app, int32_t cmd) {
                 auto s = mobiro::gfx::DxvkInterop::global().surface();
                 g_rt.touch_ctrl.set_viewport(static_cast<float>(s.width), static_cast<float>(s.height));
                 g_rt.box64.window().set_dimensions(s.width, s.height);
-                __android_log_print(ANDROID_LOG_INFO, kLogTag,
-                                    "ANativeWindow bound: %dx%d (gen=%llu)",
-                                    s.width, s.height,
-                                    static_cast<unsigned long long>(s.generation));
+                mobiro_boot_log("ANativeWindow bound: %dx%d (gen=%llu)",
+                                s.width, s.height,
+                                static_cast<unsigned long long>(s.generation));
             }
             break;
         case APP_CMD_TERM_WINDOW:
             mobiro::gfx::DxvkInterop::global().set_native_window(nullptr, 0, 0);
-            __android_log_print(ANDROID_LOG_INFO, kLogTag, "ANativeWindow released");
+            mobiro_boot_log("ANativeWindow released");
             break;
         default:
             break;
@@ -402,16 +433,18 @@ extern "C" void android_main(struct android_app* app) {
             if (!g_rt.guest_started.exchange(true, std::memory_order_acq_rel)) {
                 g_rt.guest_thread = std::thread([]() {
                     g_rt.balancer.bind_current_thread(mobiro::sched::ThreadRole::MainSimPhysics);
-                    __android_log_print(ANDROID_LOG_INFO, kLogTag,
-                                        "Launching guest entry point at 0x%llx",
-                                        static_cast<unsigned long long>(g_rt.pe_image.entry_point));
+                    mobiro_boot_log("Launching guest entry point at 0x%llx",
+                                    static_cast<unsigned long long>(g_rt.pe_image.entry_point));
                     auto res = mobiro::cpu::GuestExecutor::run_entry(
                         g_rt.pe_image, g_rt.main_thread_env, g_rt.box64);
-                    __android_log_print(ANDROID_LOG_INFO, kLogTag,
-                                        "Guest exited ok=%d rax=0x%llx err=%s",
-                                        res.ok ? 1 : 0,
-                                        static_cast<unsigned long long>(res.exit_rax),
-                                        res.error.c_str());
+                    mobiro_boot_log("Guest exited ok=%d rax=0x%llx err=%s",
+                                    res.ok ? 1 : 0,
+                                    static_cast<unsigned long long>(res.exit_rax),
+                                    res.error.c_str());
+                    const auto called = g_rt.box64.called_unresolved_imports();
+                    for (size_t i = 0; i < called.size() && i < 32; ++i) {
+                        mobiro_boot_log("  called missing IAT[%zu]: %s", i, called[i].c_str());
+                    }
                 });
             }
         }
