@@ -189,6 +189,8 @@ public:
     win32::GuestThreadTable& threads() { return threads_; }
     win32::ModuleRegistry& modules() { return modules_; }
     win32::HeadlessWindowState& window() { return window_; }
+    StaticTlsRegistry& static_tls() { return static_tls_; }
+    const StaticTlsRegistry& static_tls() const { return static_tls_; }
     void set_main_module_base(uintptr_t base) { main_module_base_ = base; }
     uintptr_t main_module_base() const { return main_module_base_; }
     void set_main_teb(Win64Teb* teb) { main_teb_ = teb; }
@@ -219,6 +221,7 @@ private:
     win32::GuestThreadTable threads_;
     win32::ModuleRegistry modules_;
     win32::HeadlessWindowState window_;
+    StaticTlsRegistry static_tls_;
     uintptr_t main_module_base_ = 0;
     Win64Teb* main_teb_ = nullptr;
     const Win64ThreadEnv* main_thread_env_ = nullptr;

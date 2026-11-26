@@ -6,6 +6,18 @@
 
 ## Log Entries
 
+### Increment 21 — M19: Win64 Implicit Static TLS (`GS:[0x58]`) Isolation & One-Command ADB BYOF Staging Script (2026-11-27)
+- **Status:** Implemented & verified (local MSVC 2022 + live retail BYOF PE64 dry-run + GitHub Actions CI)
+- **Changes:**
+  - Fixed a critical Win64 `__declspec(thread)` / `thread_local` crash gap across `sekiro.exe`, `fmod_event64.dll`, and `fmodex64.dll` (all three ship non-empty `IMAGE_TLS_DIRECTORY64` templates):
+    - Added `StaticTlsRegistry` (`app/src/main/cpp/cpu_mem/win64_teb.hpp`) and separated `Win64Teb::static_tls_ptrs[32]` (`GS:[0x58]`) from dynamic `TlsAlloc` `tls_slots[64]` (`GS:[0x1480]`).
+    - Updated `PeLoader::load_pe64_impl` (`pe_loader.hpp`) to register each PE's `.tls` raw template + zero-fill and patch `*AddressOfIndex` (`_tls_index`) before tightening section protections.
+    - Populated isolated per-thread copies of all registered `.tls` templates inside `Win64ThreadEnv::init_main_thread` (`runtime_main.cpp`) and `GuestThreadTable::create_thread` (`win32_thread_wait.hpp`).
+  - Added clean-room PC → Android deployment helper `scripts/stage_byof_adb.ps1` (installs APK, validates & pushes user's own local BYOF files into `/sdcard/Android/data/com.mobiro.runtime/files/game`, launches `com.mobiro.runtime`, and optionally streams `adb logcat -s Mobiro`).
+  - Added `test_m19_win64_static_tls_pointer_isolation` in `tests/test_core.cpp` (20/20 test suites passing; live retail `--verify-byof` confirmed `static_tls_mods=3`, `iat_resolved=534`, `iat_unresolved=0`).
+
+---
+
 ### Increment 20 — M18: 100% Retail `sekiro.exe` + BYOF DLL Import Coverage, Real `Data1..Data5` Validator Fix, FMODEx/Bink2 `waveOut*` → `AAudio` Bridge & DirectInput8 `onebridge_t` Proxy (2026-11-27)
 - **Status:** Implemented & verified (local MSVC 2022 + real BYOF PE64 dry-run load & IAT patch + GitHub Actions CI)
 - **Changes:**

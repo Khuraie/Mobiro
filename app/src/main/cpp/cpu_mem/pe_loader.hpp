@@ -333,8 +333,22 @@ private:
             res.pdata_size = pdata_sz;
         }
         uint32_t tls_rva = 0, tls_sz = 0;
-        if (data_dir(9, tls_rva, tls_sz)) {
+        if (data_dir(9, tls_rva, tls_sz) && tls_rva + 40 <= size_of_image) {
             res.tls_dir_va = target_va + tls_rva;
+            // Register static `.tls` template and patch module's _tls_index (*AddressOfIndex)
+            const uint8_t* td = base_ptr + tls_rva;
+            const uint64_t raw_start = rd64(td + 0);
+            const uint64_t raw_end   = rd64(td + 8);
+            const uint64_t idx_va    = rd64(td + 16);
+            const uint32_t zero_fill = rd32(td + 32);
+            const size_t raw_len = (raw_end > raw_start && raw_end - raw_start <= 65536)
+                                       ? static_cast<size_t>(raw_end - raw_start)
+                                       : 0u;
+            const uint32_t mod_tls_idx = bridge.static_tls().register_module(
+                static_cast<uintptr_t>(raw_start), raw_len, static_cast<size_t>(zero_fill));
+            if (idx_va >= target_va && idx_va + 4 <= target_va + size_of_image) {
+                std::memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(idx_va)), &mod_tls_idx, 4);
+            }
         }
 
         // 4. Tighten section host memory protections (guest .text becomes PROT_READ)

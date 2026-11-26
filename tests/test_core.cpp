@@ -2241,6 +2241,43 @@ void test_m18_winmm_waveout_xinput_ordinals_and_sekiro_compat() {
     bridge.shutdown();
 }
 
+void test_m19_win64_static_tls_pointer_isolation() {
+    mobiro::mem::GuestArena arena;
+    assert(arena.reserve(0x0000000100000000ULL, 128ULL * 1024 * 1024));
+    mobiro::validator::VfsMapper vfs;
+    mobiro::cpu::Box64Bridge bridge;
+    assert(bridge.initialize(&arena, &vfs));
+
+    // Register two synthetic PE `.tls` templates (like sekiro.exe + fmodex64.dll)
+    const uint64_t tpl0 = 0x1122334455667788ULL;
+    const uint32_t tpl1 = 0xCAFEBABEu;
+    const uint32_t idx0 = bridge.static_tls().register_module(reinterpret_cast<uintptr_t>(&tpl0), sizeof(tpl0), 8);
+    const uint32_t idx1 = bridge.static_tls().register_module(reinterpret_cast<uintptr_t>(&tpl1), sizeof(tpl1), 4);
+    assert(idx0 == 0 && idx1 == 1 && bridge.static_tls().module_count() == 2);
+
+    mobiro::cpu::Win64ThreadEnv t_main{}, t_worker{};
+    assert(t_main.init_main_thread(arena, 0x140000000ULL, 8, 1000, 1, 512 * 1024, &bridge.static_tls()));
+    assert(t_worker.init_worker_thread(arena, 0x140000000ULL, 8, 1000, 2, 256 * 1024, &bridge.static_tls()));
+
+    // GS:[0x58] must point to static_tls_ptrs[] (separate from dynamic TlsAlloc slots at GS:[0x1480])
+    assert(t_main.teb->tls_array_ptr == reinterpret_cast<uintptr_t>(&t_main.teb->static_tls_ptrs[0]));
+    assert(t_main.teb->tls_array_ptr != reinterpret_cast<uintptr_t>(&t_main.teb->tls_slots[0]));
+
+    auto* main_m0 = reinterpret_cast<uint64_t*>(t_main.teb->static_tls_ptrs[0]);
+    auto* main_m1 = reinterpret_cast<uint32_t*>(t_main.teb->static_tls_ptrs[1]);
+    auto* work_m0 = reinterpret_cast<uint64_t*>(t_worker.teb->static_tls_ptrs[0]);
+    assert(main_m0 && main_m1 && work_m0 && main_m0 != work_m0);
+    assert(*main_m0 == tpl0 && *main_m1 == tpl1 && *work_m0 == tpl0);
+
+    // Mutating main thread's __declspec(thread) slot must not affect worker thread or TlsAlloc slot 0
+    *main_m0 = 0xDEADBEEFULL;
+    t_main.teb->tls_slots[0] = 0x9999ULL;
+    assert(*work_m0 == tpl0);
+    assert(t_main.teb->static_tls_ptrs[0] == reinterpret_cast<uintptr_t>(main_m0));
+
+    bridge.shutdown();
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -2280,6 +2317,7 @@ int main(int argc, char** argv) {
                   << " base=0x" << std::hex << pe.mapped_base << std::dec
                   << " relocs=" << pe.relocations_applied
                   << " dep_dlls=" << pe.dep_dlls.size()
+                  << " static_tls_mods=" << bridge.static_tls().module_count()
                   << " iat_resolved=" << pe.imports_resolved
                   << " iat_unresolved=" << pe.unresolved_imports.size() << "\n";
         for (const auto& u : pe.unresolved_imports) std::cout << "  UNRESOLVED: " << u << "\n";
@@ -2305,6 +2343,7 @@ int main(int argc, char** argv) {
     test_m16_init_once_slist_time_query_and_xinput_caps();
     test_m17_xaudio2_onebridge_ring_and_gourd_touch();
     test_m18_winmm_waveout_xinput_ordinals_and_sekiro_compat();
+    test_m19_win64_static_tls_pointer_isolation();
     std::cout << "All Mobiro core unit tests passed.\n";
     return 0;
 }

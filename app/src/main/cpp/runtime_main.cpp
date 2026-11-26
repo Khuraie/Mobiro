@@ -288,7 +288,8 @@ Java_com_mobiro_runtime_MainActivity_nativeConfigureAndValidate(
     const uint32_t cpus = static_cast<uint32_t>(sysconf(_SC_NPROCESSORS_CONF));
     if (!g_rt.main_thread_env.init_main_thread(
             g_rt.arena, g_rt.pe_image.mapped_base, cpus,
-            static_cast<uint64_t>(getpid()), static_cast<uint64_t>(gettid()))) {
+            static_cast<uint64_t>(getpid()), static_cast<uint64_t>(gettid()),
+            2 * 1024 * 1024, &g_rt.box64.static_tls())) {
         return env->NewStringUTF("Failed to initialize Win64 TEB/PEB.");
     }
     g_rt.box64.set_main_thread_env(&g_rt.main_thread_env);

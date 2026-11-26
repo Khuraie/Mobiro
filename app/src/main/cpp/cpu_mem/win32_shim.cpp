@@ -1504,6 +1504,7 @@ bool Box64Bridge::initialize(mem::GuestArena* arena, validator::VfsMapper* vfs) 
 #endif
     stub_count_ = 0;
     heap_.initialize(arena_, 32 * 1024 * 1024);
+    threads_.set_static_tls(&static_tls_);
     threads_.set_env_dispatch_callback(
         [](uintptr_t start_pc, uintptr_t param, const Win64ThreadEnv& env) -> uint32_t {
             auto r = GuestExecutor::call_guest_fn(start_pc, param, 0ULL, 0ULL, env);
@@ -1522,6 +1523,7 @@ void Box64Bridge::shutdown() {
     events_.clear();
     modules_.clear();
     window_.clear();
+    static_tls_.clear();
     heap_.reset();
     {
         std::lock_guard<std::mutex> lk(unresolved_mu_);

@@ -97,6 +97,7 @@ public:
     ~GuestThreadTable() { join_all(); }
 
     void set_balancer(sched::ThreadBalancer* balancer) { balancer_ = balancer; }
+    void set_static_tls(const cpu::StaticTlsRegistry* tls) { static_tls_ = tls; }
     void set_dispatch_callback(ThreadDispatchFn fn) { dispatch_fn_ = std::move(fn); }
     void set_env_dispatch_callback(EnvDispatchFn fn) { env_dispatch_fn_ = std::move(fn); }
 
@@ -112,7 +113,7 @@ public:
         auto rec = std::make_shared<ThreadRec>();
         const uint32_t tid = next_tid_.fetch_add(1);
         rec->tid = tid;
-        if (!rec->env.init_worker_thread(*arena, image_base, 8, 1000, tid, 512 * 1024)) {
+        if (!rec->env.init_worker_thread(*arena, image_base, 8, 1000, tid, 512 * 1024, static_tls_)) {
             return 0;
         }
 
@@ -204,6 +205,7 @@ private:
     mutable std::mutex mu_;
     std::atomic<uint32_t> next_tid_{200};
     sched::ThreadBalancer* balancer_ = nullptr;
+    const cpu::StaticTlsRegistry* static_tls_ = nullptr;
     ThreadDispatchFn dispatch_fn_;
     EnvDispatchFn env_dispatch_fn_;
     std::unordered_map<uint64_t, std::shared_ptr<ThreadRec>> threads_;
