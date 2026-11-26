@@ -3,6 +3,7 @@
 #include "cpu_mem/pe_loader.hpp"
 #include "cpu_mem/win64_teb.hpp"
 #include "gfx/dxvk_config_gen.hpp"
+#include "gfx/dxvk_interop.hpp"
 #include "gfx/turnip_loader.hpp"
 #include "input/input_router.hpp"
 #include "sched/thread_balancer.hpp"
@@ -134,10 +135,13 @@ Java_com_mobiro_runtime_MainActivity_nativeConfigureAndValidate(
     setenv("MESA_SHADER_CACHE_DIR", (build_cache + "/turnip").c_str(), 1);
     setenv("MESA_SHADER_CACHE_MAX_SIZE", "1G", 1);
 
-    // 4. Load Mesa Turnip ICD (with graceful fallback to system Vulkan)
+    // 4. Load Mesa Turnip ICD (with graceful fallback to system Vulkan) + native AArch64 DXVK
     g_rt.vk_driver = mobiro::gfx::load_vulkan_driver(lib_dir);
-    __android_log_print(ANDROID_LOG_INFO, kLogTag, "Vulkan ICD loaded: %s (turnip=%d)",
-                        g_rt.vk_driver.loaded_path.c_str(), g_rt.vk_driver.using_turnip ? 1 : 0);
+    const bool dxvk_loaded = mobiro::gfx::DxvkInterop::global().load_native_libraries(lib_dir);
+    __android_log_print(ANDROID_LOG_INFO, kLogTag, "Vulkan ICD loaded: %s (turnip=%d, dxvk_native=%d)",
+                        g_rt.vk_driver.loaded_path.c_str(),
+                        g_rt.vk_driver.using_turnip ? 1 : 0,
+                        dxvk_loaded ? 1 : 0);
 
     // 5. Reserve Win64 guest VA arena & initialize Box64 thunk bridge
     if (!g_rt.arena.reserve(0x0000000100000000ULL, 10ULL * 1024 * 1024 * 1024)) {
@@ -194,9 +198,34 @@ Java_com_mobiro_runtime_MainActivity_nativeOnThermalHeadroom(
     // Step down from 60 -> 30 FPS cleanly before aggressive thermal throttling hits
     int desired = (headroom >= 0.85f) ? 30 : 60;
     g_rt.target_fps.store(desired, std::memory_order_relaxed);
+    mobiro::gfx::DxvkInterop::global().set_target_fps(desired);
 }
 
+namespace {
+void handle_app_cmd(android_app* app, int32_t cmd) {
+    switch (cmd) {
+        case APP_CMD_INIT_WINDOW:
+            if (app->window) {
+                mobiro::gfx::DxvkInterop::global().set_native_window(app->window);
+                auto s = mobiro::gfx::DxvkInterop::global().surface();
+                __android_log_print(ANDROID_LOG_INFO, kLogTag,
+                                    "ANativeWindow bound: %dx%d (gen=%llu)",
+                                    s.width, s.height,
+                                    static_cast<unsigned long long>(s.generation));
+            }
+            break;
+        case APP_CMD_TERM_WINDOW:
+            mobiro::gfx::DxvkInterop::global().set_native_window(nullptr, 0, 0);
+            __android_log_print(ANDROID_LOG_INFO, kLogTag, "ANativeWindow released");
+            break;
+        default:
+            break;
+    }
+}
+} // namespace
+
 extern "C" void android_main(struct android_app* app) {
+    app->onAppCmd = handle_app_cmd;
     while (!app->destroyRequested) {
         int events = 0;
         android_poll_source* source = nullptr;
@@ -206,5 +235,6 @@ extern "C" void android_main(struct android_app* app) {
         process_game_activity_input(app);
     }
     g_rt.box64.shutdown();
+    mobiro::gfx::DxvkInterop::global().unload();
     mobiro::gfx::unload_vulkan_driver(g_rt.vk_driver);
 }

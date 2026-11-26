@@ -6,7 +6,19 @@
 
 ## Log Entries
 
+### Increment 4 — M2: Native AArch64 DXVK & Mesa Turnip Interop, `ANativeWindow` Lifecycle & MS-x64 D3D11 Marshaling (2026-11-27)
+- **Status:** Implemented & verified (local MSVC 2022 + GitHub Actions Linux GCC & Android ARM64 NDK)
+- **Changes:**
+  - Implemented `DxvkInterop` (`app/src/main/cpp/gfx/dxvk_interop.hpp`) for dynamic `dlopen` loading of source-built native AArch64 `libdxvk_d3d11.so` + `libdxvk_dxgi.so`, `ANativeWindow` surface generation tracking, and `30/60 FPS` frame interval pacing.
+  - Replaced placeholder graphics thunks in `win32_shim.cpp` with full 10-arg `D3D11CreateDevice`, 12-arg `D3D11CreateDeviceAndSwapChain`, and `CreateDXGIFactory1`/`2` MS-x64 register + stack marshaling into native AArch64 DXVK.
+  - Wired `APP_CMD_INIT_WINDOW` / `APP_CMD_TERM_WINDOW` and thermal FPS step-down into `runtime_main.cpp`.
+  - Added transparent Android NDK Meson cross-build scripts: `scripts/build_turnip_android.sh` (Mesa Freedreno Turnip `libvulkan_freedreno.so`) and `scripts/build_dxvk_android.sh` (native AArch64 `libdxvk_d3d11.so` + `libdxvk_dxgi.so`).
+  - Added `test_dxvk_interop_and_ms_x64_marshaling` in `tests/test_core.cpp` verifying 10-arg MS-x64 D3D11CreateDevice marshaling, DXGI factory creation, and thermal frame pacing intervals.
+
+---
+
 ### Increment 3 — M1-b: Guest Executor, SEH `.pdata` Unwind Registry, Win32 Heap/Events & Box64 Build Script (2026-11-27)
+- **Commit:** `c939700` (CI Run `45856320605` — Linux GCC tests 11s, Android ARM64 APK 1m27s)
 - **Status:** Implemented & verified (local MSVC 2022 + GitHub Actions Linux GCC & Android ARM64 NDK)
 - **Changes:**
   - Implemented `GuestHeap`, `EventTable`, `Win64SystemInfo`, and `SehUnwindRegistry` (`app/src/main/cpp/cpu_mem/win32_proc_sync.hpp`), adding `GetProcessHeap`, `HeapAlloc`, `HeapReAlloc`, `HeapFree`, `HeapSize`, `CreateEventW`/`A`, `SetEvent`, `ResetEvent`, `WaitForSingleObject`, unified `CloseHandle`, `GetLastError`/`SetLastError`, `GetSystemInfo`, and `RtlLookupFunctionEntry`.
@@ -44,6 +56,5 @@
 ---
 
 ## Upcoming Increments
-- **Increment 4 (M2):** Cross-compile native AArch64 `DXVK` + `Mesa Turnip` (`libvulkan_freedreno.so`) from source, add `dxvk_interop.cpp` (`ANativeWindow` → `VK_KHR_android_surface` + `SwappyVk`), and wire `D3D11CreateDevice`/`CreateDXGIFactory1` thunks.
-- **Increment 5 (M3):** Win32 `CreateThread` + `ThreadBalancer` auto-classification, writable save-game VFS overlay, `WaitOnAddress` futex sync, and `XAudio2` → `AAudio` bridge.
+- **Increment 5 (M3):** Win32 `CreateThread` + `ThreadBalancer` auto-classification, writable save-game VFS overlay, `WaitOnAddress` futex sync, and `XAudio2` → `AAudio` low-latency audio bridge.
 - **Increment 6 (M4):** In-swapchain Vulkan touch HUD overlay and GPL pipeline pre-warming.

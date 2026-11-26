@@ -1,4 +1,5 @@
 #include "box64_bridge.hpp"
+#include "../gfx/dxvk_interop.hpp"
 #include "../input/input_router.hpp"
 
 #include <chrono>
@@ -358,16 +359,59 @@ void thunk_XInputSetState(x64emu_t* emu) {
     reg_rax(emu) = (user_idx == 0) ? 0ULL : 1167ULL;
 }
 
-// --- Graphics (Native ARM64 DXVK placeholders until M2 submodule link) ---
+// --- Graphics (MS x64 ABI -> Native ARM64 DXVK Interop) ---
 
+// HRESULT D3D11CreateDevice(
+//   RCX: pAdapter, RDX: DriverType, R8: Software, R9: Flags,
+//   [RSP+0x28]: pFeatureLevels, [RSP+0x30]: FeatureLevels, [RSP+0x38]: SDKVersion,
+//   [RSP+0x40]: ppDevice, [RSP+0x48]: pFeatureLevel, [RSP+0x50]: ppImmediateContext)
 void thunk_D3D11CreateDevice(x64emu_t* emu) {
-    // shortcut: returns E_NOTIMPL until native ARM64 DXVK submodule is built and linked in M2.
-    reg_rax(emu) = 0x80004001ULL;
+    auto* adapter            = reinterpret_cast<void*>(reg_rcx(emu));
+    const auto driver_type   = static_cast<uint32_t>(reg_rdx(emu));
+    auto* software           = reinterpret_cast<void*>(reg_r8(emu));
+    const auto flags         = static_cast<uint32_t>(reg_r9(emu));
+    const auto* feat_levels  = reinterpret_cast<const uint32_t*>(stack_arg(emu, 0));
+    const auto num_levels    = static_cast<uint32_t>(stack_arg(emu, 1));
+    const auto sdk_version   = static_cast<uint32_t>(stack_arg(emu, 2));
+    auto** out_device        = reinterpret_cast<void**>(stack_arg(emu, 3));
+    auto* out_level          = reinterpret_cast<uint32_t*>(stack_arg(emu, 4));
+    auto** out_context       = reinterpret_cast<void**>(stack_arg(emu, 5));
+
+    const int32_t hr = mobiro::gfx::DxvkInterop::global().call_d3d11_create_device(
+        adapter, driver_type, software, flags,
+        feat_levels, num_levels, sdk_version,
+        out_device, out_level, out_context);
+    reg_rax(emu) = static_cast<uint64_t>(static_cast<uint32_t>(hr));
 }
 
+// HRESULT D3D11CreateDeviceAndSwapChain (12 args: 4 regs + 8 stack args)
+void thunk_D3D11CreateDeviceAndSwapChain(x64emu_t* emu) {
+    auto* adapter            = reinterpret_cast<void*>(reg_rcx(emu));
+    const auto driver_type   = static_cast<uint32_t>(reg_rdx(emu));
+    auto* software           = reinterpret_cast<void*>(reg_r8(emu));
+    const auto flags         = static_cast<uint32_t>(reg_r9(emu));
+    const auto* feat_levels  = reinterpret_cast<const uint32_t*>(stack_arg(emu, 0));
+    const auto num_levels    = static_cast<uint32_t>(stack_arg(emu, 1));
+    const auto sdk_version   = static_cast<uint32_t>(stack_arg(emu, 2));
+    const auto* sc_desc      = reinterpret_cast<const void*>(stack_arg(emu, 3));
+    auto** out_swap_chain    = reinterpret_cast<void**>(stack_arg(emu, 4));
+    auto** out_device        = reinterpret_cast<void**>(stack_arg(emu, 5));
+    auto* out_level          = reinterpret_cast<uint32_t*>(stack_arg(emu, 6));
+    auto** out_context       = reinterpret_cast<void**>(stack_arg(emu, 7));
+
+    const int32_t hr = mobiro::gfx::DxvkInterop::global().call_d3d11_create_device_and_swap_chain(
+        adapter, driver_type, software, flags,
+        feat_levels, num_levels, sdk_version,
+        sc_desc, out_swap_chain, out_device, out_level, out_context);
+    reg_rax(emu) = static_cast<uint64_t>(static_cast<uint32_t>(hr));
+}
+
+// HRESULT CreateDXGIFactory1(RCX: REFIID riid, RDX: void** ppFactory)
 void thunk_CreateDXGIFactory1(x64emu_t* emu) {
-    // shortcut: returns E_NOTIMPL until native ARM64 DXVK submodule is built and linked in M2.
-    reg_rax(emu) = 0x80004001ULL;
+    const auto* riid  = reinterpret_cast<const void*>(reg_rcx(emu));
+    auto** out_factory = reinterpret_cast<void**>(reg_rdx(emu));
+    const int32_t hr = mobiro::gfx::DxvkInterop::global().call_create_dxgi_factory1(riid, out_factory);
+    reg_rax(emu) = static_cast<uint64_t>(static_cast<uint32_t>(hr));
 }
 
 } // namespace
@@ -489,7 +533,9 @@ void Box64Bridge::register_default_win32_thunks() {
 
     // Graphics
     register_thunk("d3d11.dll", "D3D11CreateDevice", &thunk_D3D11CreateDevice);
+    register_thunk("d3d11.dll", "D3D11CreateDeviceAndSwapChain", &thunk_D3D11CreateDeviceAndSwapChain);
     register_thunk("dxgi.dll", "CreateDXGIFactory1", &thunk_CreateDXGIFactory1);
+    register_thunk("dxgi.dll", "CreateDXGIFactory2", &thunk_CreateDXGIFactory1);
 }
 
 } // namespace mobiro::cpu

@@ -4,6 +4,7 @@
 #include "cpu_mem/pe_loader.hpp"
 #include "cpu_mem/win64_teb.hpp"
 #include "gfx/dxvk_config_gen.hpp"
+#include "gfx/dxvk_interop.hpp"
 #include "input/input_router.hpp"
 #include "sched/thread_balancer.hpp"
 #include "validator/archive_probe.hpp"
@@ -475,6 +476,92 @@ void test_x86_64_guest_execution_and_seh() {
     fs::remove_all(tmp);
 }
 
+void test_dxvk_interop_and_ms_x64_marshaling() {
+    auto& interop = mobiro::gfx::DxvkInterop::global();
+    interop.unload();
+
+    // Surface lifecycle & thermal FPS pacing
+    int dummy_win = 0;
+    interop.set_native_window(&dummy_win, 2400, 1080);
+    auto snap = interop.surface();
+    assert(snap.native_window == &dummy_win && snap.width == 2400 && snap.height == 1080);
+    assert(interop.target_frame_interval_ns() == 16'666'666LL);
+    interop.set_target_fps(30);
+    assert(interop.target_frame_interval_ns() == 33'333'333LL);
+    interop.set_target_fps(60);
+
+    mobiro::mem::GuestArena arena;
+    assert(arena.reserve(0x0000000100000000ULL, 64ULL * 1024 * 1024));
+    mobiro::validator::VfsMapper vfs;
+    mobiro::cpu::Box64Bridge bridge;
+    assert(bridge.initialize(&arena, &vfs));
+
+    // Unloaded DXVK must cleanly return E_NOTIMPL
+    x64emu_t emu{};
+    assert(bridge.invoke_thunk("dxgi.dll", "CreateDXGIFactory1", &emu));
+    assert(static_cast<uint32_t>(emu.rax) == 0x80004001u);
+
+    // Inject test DXVK backend to verify exact 10-arg MS-x64 register+stack marshaling
+    static bool saw_expected_args = false;
+    mobiro::gfx::DxvkBackendTable mock{};
+    mock.create_dxgi_factory1 = [](const void* riid, void** out_factory) -> int32_t {
+        if (!riid || !out_factory) return static_cast<int32_t>(0x80070057u);
+        *out_factory = reinterpret_cast<void*>(0x11223344ULL);
+        return 0; // S_OK
+    };
+    mock.d3d11_create_device = [](
+        void* adapter, uint32_t driver_type, void* software, uint32_t flags,
+        const uint32_t* levels, uint32_t num_levels, uint32_t sdk_ver,
+        void** out_dev, uint32_t* out_lvl, void** out_ctx) -> int32_t {
+        saw_expected_args = (adapter == nullptr && driver_type == 1 && software == nullptr &&
+                             flags == 0x20 && levels && num_levels == 1 && levels[0] == 0xB000 &&
+                             sdk_ver == 7 && out_dev && out_lvl && out_ctx);
+        if (!saw_expected_args) return static_cast<int32_t>(0x80070057u);
+        *out_dev = reinterpret_cast<void*>(0xAAAABBBBULL);
+        *out_lvl = 0xB000; // D3D_FEATURE_LEVEL_11_0
+        *out_ctx = reinterpret_cast<void*>(0xCCCCDDDDULL);
+        return 0; // S_OK
+    };
+    interop.set_backend_override(mock);
+
+    // 1. Test CreateDXGIFactory1
+    uint8_t fake_guid[16]{1, 2, 3, 4};
+    void* factory_out = nullptr;
+    emu = {};
+    emu.rcx = reinterpret_cast<uint64_t>(fake_guid);
+    emu.rdx = reinterpret_cast<uint64_t>(&factory_out);
+    assert(bridge.invoke_thunk("dxgi.dll", "CreateDXGIFactory1", &emu));
+    assert(emu.rax == 0 && factory_out == reinterpret_cast<void*>(0x11223344ULL));
+
+    // 2. Test 10-arg D3D11CreateDevice (4 regs + 6 stack args at [RSP+0x28..0x50])
+    uint32_t req_levels[1] = {0xB000};
+    void* dev_out = nullptr;
+    uint32_t fl_out = 0;
+    void* ctx_out = nullptr;
+    uint64_t stack[12]{};
+    stack[5]  = reinterpret_cast<uint64_t>(req_levels); // arg5: pFeatureLevels
+    stack[6]  = 1;                                      // arg6: FeatureLevels
+    stack[7]  = 7;                                      // arg7: D3D11_SDK_VERSION
+    stack[8]  = reinterpret_cast<uint64_t>(&dev_out);   // arg8: ppDevice
+    stack[9]  = reinterpret_cast<uint64_t>(&fl_out);    // arg9: pFeatureLevel
+    stack[10] = reinterpret_cast<uint64_t>(&ctx_out);   // arg10: ppImmediateContext
+
+    emu = {};
+    emu.rcx = 0;    // pAdapter
+    emu.rdx = 1;    // D3D_DRIVER_TYPE_HARDWARE
+    emu.r8  = 0;    // Software
+    emu.r9  = 0x20; // D3D11_CREATE_DEVICE_BGRA_SUPPORT
+    emu.rsp = reinterpret_cast<uint64_t>(stack);
+    assert(bridge.invoke_thunk("d3d11.dll", "D3D11CreateDevice", &emu));
+    assert(emu.rax == 0 && saw_expected_args);
+    assert(dev_out == reinterpret_cast<void*>(0xAAAABBBBULL));
+    assert(fl_out == 0xB000);
+    assert(ctx_out == reinterpret_cast<void*>(0xCCCCDDDDULL));
+
+    interop.unload();
+    bridge.shutdown();
+}
+
 } // namespace
 
 int main() {
@@ -482,6 +569,7 @@ int main() {
     test_pe_loader_teb_and_win32_thunks();
     test_dxvk_config_and_topology();
     test_x86_64_guest_execution_and_seh();
+    test_dxvk_interop_and_ms_x64_marshaling();
     std::cout << "All Mobiro core unit tests passed.\n";
     return 0;
 }
