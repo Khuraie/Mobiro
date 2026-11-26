@@ -1,3 +1,4 @@
+#include "audio/aaudio_xaudio_bridge.hpp"
 #include "cpu_mem/box64_bridge.hpp"
 #include "cpu_mem/guest_arena.hpp"
 #include "cpu_mem/pe_loader.hpp"
@@ -115,7 +116,8 @@ Java_com_mobiro_runtime_MainActivity_nativeConfigureAndValidate(
     g_rt.balancer.initialize(16'666'666);
     g_rt.balancer.bind_current_thread(mobiro::sched::ThreadRole::MainSimPhysics);
 
-    // 3. Configure per-build shader & pipeline cache directories + dynamic dxvk.conf
+    // 3. Configure writable save overlay + per-build shader/pipeline cache + dynamic dxvk.conf
+    g_rt.vfs.set_write_overlay(cache_dir + "/saves_overlay");
     const std::string build_cache = cache_dir + "/" + report.pe.build_fingerprint;
     std::error_code ec;
     std::filesystem::create_directories(build_cache + "/turnip", ec);
@@ -150,6 +152,7 @@ Java_com_mobiro_runtime_MainActivity_nativeConfigureAndValidate(
     if (!g_rt.box64.initialize(&g_rt.arena, &g_rt.vfs)) {
         return env->NewStringUTF("Failed to initialize Box64 native thunk bridge.");
     }
+    g_rt.box64.threads().set_balancer(&g_rt.balancer);
 
     // 6. Map sekiro.exe PE64 sections, apply relocations, patch IAT, and initialize Win64 TEB/PEB
     std::string exe_host_path;
@@ -235,6 +238,7 @@ extern "C" void android_main(struct android_app* app) {
         process_game_activity_input(app);
     }
     g_rt.box64.shutdown();
+    mobiro::audio::AAudioXAudioBridge::global().stop();
     mobiro::gfx::DxvkInterop::global().unload();
     mobiro::gfx::unload_vulkan_driver(g_rt.vk_driver);
 }

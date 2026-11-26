@@ -6,7 +6,18 @@
 
 ## Log Entries
 
+### Increment 5 — M3: Writable Save-Game VFS Overlay, `CreateThread` + `WaitOnAddress` & `XAudio2` → `AAudio` Bridge (2026-11-27)
+- **Status:** Implemented & verified (local MSVC 2022 + GitHub Actions Linux GCC & Android ARM64 NDK)
+- **Changes:**
+  - Added copy-on-write writable save-game overlay (`set_write_overlay` / `resolve_for_write` with path-traversal guard) to `VfsMapper` and `WriteFile`/`FlushFileBuffers`/`GENERIC_WRITE` routing in `FileHandleTable` so save files never mutate the user's read-only BYOF PC directory.
+  - Implemented `GuestThreadTable` (`CreateThread` with per-thread `Win64Teb` + automatic `ThreadBalancer` worker core binding + `WaitForSingleObject` join) and `AddressWaitTable` (`WaitOnAddress` / `WakeByAddressSingle` / `WakeByAddressAll`) in `app/src/main/cpp/cpu_mem/win32_thread_wait.hpp`.
+  - Implemented `AAudioXAudioBridge` (`app/src/main/cpp/audio/aaudio_xaudio_bridge.hpp`) with a lock-free SPSC stereo float32 PCM ring buffer feeding Android's `AAUDIO_PERFORMANCE_MODE_LOW_LATENCY` stream, linked `libaaudio` in `CMakeLists.txt`, and wired `xaudio2_7.dll`/`xaudio2_9.dll!XAudio2Create`.
+  - Added `test_vfs_write_overlay_threads_wait_and_audio` in `tests/test_core.cpp` verifying save overlay isolation, path traversal rejection, `CreateThread` + `WaitOnAddress` cross-thread sync, and `XAudio2` PCM ring buffer drain/underrun zero-fill.
+
+---
+
 ### Increment 4 — M2: Native AArch64 DXVK & Mesa Turnip Interop, `ANativeWindow` Lifecycle & MS-x64 D3D11 Marshaling (2026-11-27)
+- **Commit:** `b71e9d9` (CI Run `45857162080` — Linux GCC tests 15s, Android ARM64 APK 1m12s)
 - **Status:** Implemented & verified (local MSVC 2022 + GitHub Actions Linux GCC & Android ARM64 NDK)
 - **Changes:**
   - Implemented `DxvkInterop` (`app/src/main/cpp/gfx/dxvk_interop.hpp`) for dynamic `dlopen` loading of source-built native AArch64 `libdxvk_d3d11.so` + `libdxvk_dxgi.so`, `ANativeWindow` surface generation tracking, and `30/60 FPS` frame interval pacing.
@@ -56,5 +67,4 @@
 ---
 
 ## Upcoming Increments
-- **Increment 5 (M3):** Win32 `CreateThread` + `ThreadBalancer` auto-classification, writable save-game VFS overlay, `WaitOnAddress` futex sync, and `XAudio2` → `AAudio` low-latency audio bridge.
-- **Increment 6 (M4):** In-swapchain Vulkan touch HUD overlay and GPL pipeline pre-warming.
+- **Increment 6 (M4):** In-swapchain Vulkan touch HUD overlay, multi-touch gesture-to-XInput routing (floating thumbstick + L1 Deflect / R1 Attack / Mikiri buttons), and GPL pipeline cache pre-warming.

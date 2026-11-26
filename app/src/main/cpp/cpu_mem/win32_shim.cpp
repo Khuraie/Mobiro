@@ -1,4 +1,5 @@
 #include "box64_bridge.hpp"
+#include "../audio/aaudio_xaudio_bridge.hpp"
 #include "../gfx/dxvk_interop.hpp"
 #include "../input/input_router.hpp"
 
@@ -118,8 +119,16 @@ void thunk_CreateFileW(x64emu_t* emu) {
         return;
     }
     const auto* wpath = reinterpret_cast<const uint16_t*>(reg_rcx(emu));
+    const uint32_t desired_access = static_cast<uint32_t>(reg_rdx(emu));
+    const uint32_t creation_disp = static_cast<uint32_t>(stack_arg(emu, 0));
     const std::string path = win32::utf16le_to_utf8(wpath);
-    reg_rax(emu) = bridge->files().open_read(bridge->vfs(), path);
+    const bool wants_write = (desired_access & 0x40000000u) != 0; // GENERIC_WRITE
+    if (wants_write) {
+        const bool truncate = (creation_disp == 2u || creation_disp == 5u); // CREATE_ALWAYS / TRUNCATE_EXISTING
+        reg_rax(emu) = bridge->files().open_write(bridge->vfs(), path, truncate);
+    } else {
+        reg_rax(emu) = bridge->files().open_read(bridge->vfs(), path);
+    }
 }
 
 void thunk_CreateFileA(x64emu_t* emu) {
@@ -129,7 +138,31 @@ void thunk_CreateFileA(x64emu_t* emu) {
         reg_rax(emu) = win32::FileHandleTable::kInvalidHandle;
         return;
     }
-    reg_rax(emu) = bridge->files().open_read(bridge->vfs(), apath);
+    const uint32_t desired_access = static_cast<uint32_t>(reg_rdx(emu));
+    const uint32_t creation_disp = static_cast<uint32_t>(stack_arg(emu, 0));
+    const bool wants_write = (desired_access & 0x40000000u) != 0;
+    if (wants_write) {
+        const bool truncate = (creation_disp == 2u || creation_disp == 5u);
+        reg_rax(emu) = bridge->files().open_write(bridge->vfs(), apath, truncate);
+    } else {
+        reg_rax(emu) = bridge->files().open_read(bridge->vfs(), apath);
+    }
+}
+
+void thunk_WriteFile(x64emu_t* emu) {
+    auto* bridge = Box64Bridge::instance();
+    if (!bridge) { reg_rax(emu) = 0; return; }
+    const uint64_t handle = reg_rcx(emu);
+    const void* buf = reinterpret_cast<const void*>(reg_rdx(emu));
+    const uint32_t nbytes = static_cast<uint32_t>(reg_r8(emu));
+    auto* out_written = reinterpret_cast<uint32_t*>(reg_r9(emu));
+    const auto* ov = reinterpret_cast<const win32::Win64Overlapped*>(stack_arg(emu, 0));
+    reg_rax(emu) = bridge->files().write_file(handle, buf, nbytes, out_written, ov) ? 1ULL : 0ULL;
+}
+
+void thunk_FlushFileBuffers(x64emu_t* emu) {
+    auto* bridge = Box64Bridge::instance();
+    reg_rax(emu) = (bridge && bridge->files().flush_file(reg_rcx(emu))) ? 1ULL : 0ULL;
 }
 
 void thunk_ReadFile(x64emu_t* emu) {
@@ -167,6 +200,8 @@ void thunk_CloseHandle(x64emu_t* emu) {
     const uint64_t h = reg_rcx(emu);
     if (bridge->events().is_event_handle(h)) {
         reg_rax(emu) = bridge->events().close(h) ? 1ULL : 0ULL;
+    } else if (bridge->threads().is_thread_handle(h)) {
+        reg_rax(emu) = bridge->threads().close(h) ? 1ULL : 0ULL;
     } else {
         reg_rax(emu) = bridge->files().close_handle(h) ? 1ULL : 0ULL;
     }
@@ -231,7 +266,62 @@ void thunk_ResetEvent(x64emu_t* emu) {
 void thunk_WaitForSingleObject(x64emu_t* emu) {
     auto* b = Box64Bridge::instance();
     if (!b) { reg_rax(emu) = win32::EventTable::kWaitFailed; return; }
-    reg_rax(emu) = b->events().wait_single(reg_rcx(emu), static_cast<uint32_t>(reg_rdx(emu)));
+    const uint64_t h = reg_rcx(emu);
+    const uint32_t ms = static_cast<uint32_t>(reg_rdx(emu));
+    if (b->threads().is_thread_handle(h)) {
+        reg_rax(emu) = b->threads().wait_single(h, ms);
+    } else {
+        reg_rax(emu) = b->events().wait_single(h, ms);
+    }
+}
+
+void thunk_CreateThread(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    if (!b || !b->arena()) { reg_rax(emu) = 0; return; }
+    const uintptr_t start_pc = static_cast<uintptr_t>(reg_r8(emu));
+    const uintptr_t param = static_cast<uintptr_t>(reg_r9(emu));
+    auto* out_tid = reinterpret_cast<uint32_t*>(stack_arg(emu, 1)); // arg6: lpThreadId
+    reg_rax(emu) = b->threads().create_thread(
+        b->arena(), b->main_module_base(), start_pc, param, out_tid);
+}
+
+void thunk_WaitOnAddress(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    if (!b) { reg_rax(emu) = 0; return; }
+    const auto* addr = reinterpret_cast<const volatile void*>(reg_rcx(emu));
+    const auto* cmp  = reinterpret_cast<const void*>(reg_rdx(emu));
+    const size_t sz  = static_cast<size_t>(reg_r8(emu));
+    const uint32_t ms = static_cast<uint32_t>(reg_r9(emu));
+    reg_rax(emu) = b->addr_wait().wait_on_address(addr, cmp, sz, ms) ? 1ULL : 0ULL;
+}
+
+void thunk_WakeByAddressSingle(x64emu_t* emu) {
+    if (auto* b = Box64Bridge::instance()) {
+        b->addr_wait().wake_single(reinterpret_cast<const void*>(reg_rcx(emu)));
+    }
+}
+
+void thunk_WakeByAddressAll(x64emu_t* emu) {
+    if (auto* b = Box64Bridge::instance()) {
+        b->addr_wait().wake_all(reinterpret_cast<const void*>(reg_rcx(emu)));
+    }
+}
+
+// --- Audio (XAudio2 -> Android AAudio low-latency bridge) ---
+
+void thunk_XAudio2Create(x64emu_t* emu) {
+    auto** out_xa2 = reinterpret_cast<void**>(reg_rcx(emu));
+    if (!out_xa2) {
+        reg_rax(emu) = 0x80070057ULL; // E_INVALIDARG
+        return;
+    }
+    auto& bridge = mobiro::audio::AAudioXAudioBridge::global();
+    if (!bridge.start(48000, 2)) {
+        reg_rax(emu) = 0x80004005ULL; // E_FAIL
+        return;
+    }
+    *out_xa2 = &bridge;
+    reg_rax(emu) = 0ULL; // S_OK
 }
 
 // --- Error state, SystemInfo & SEH Unwind ---
@@ -416,7 +506,7 @@ void thunk_CreateDXGIFactory1(x64emu_t* emu) {
 
 } // namespace
 
-bool Box64Bridge::initialize(mem::GuestArena* arena, const validator::VfsMapper* vfs) {
+bool Box64Bridge::initialize(mem::GuestArena* arena, validator::VfsMapper* vfs) {
     arena_ = arena;
     vfs_ = vfs;
     g_instance_ = this;
@@ -440,6 +530,7 @@ bool Box64Bridge::initialize(mem::GuestArena* arena, const validator::VfsMapper*
 }
 
 void Box64Bridge::shutdown() {
+    threads_.join_all();
     files_.close_all();
     srw_locks_.clear();
     events_.clear();
@@ -487,6 +578,8 @@ void Box64Bridge::register_default_win32_thunks() {
     register_thunk("kernel32.dll", "CreateFileW", &thunk_CreateFileW);
     register_thunk("kernel32.dll", "CreateFileA", &thunk_CreateFileA);
     register_thunk("kernel32.dll", "ReadFile", &thunk_ReadFile);
+    register_thunk("kernel32.dll", "WriteFile", &thunk_WriteFile);
+    register_thunk("kernel32.dll", "FlushFileBuffers", &thunk_FlushFileBuffers);
     register_thunk("kernel32.dll", "SetFilePointerEx", &thunk_SetFilePointerEx);
     register_thunk("kernel32.dll", "GetFileSizeEx", &thunk_GetFileSizeEx);
     register_thunk("kernel32.dll", "CloseHandle", &thunk_CloseHandle);
@@ -520,6 +613,17 @@ void Box64Bridge::register_default_win32_thunks() {
     register_thunk("kernel32.dll", "SetEvent", &thunk_SetEvent);
     register_thunk("kernel32.dll", "ResetEvent", &thunk_ResetEvent);
     register_thunk("kernel32.dll", "WaitForSingleObject", &thunk_WaitForSingleObject);
+    register_thunk("kernel32.dll", "CreateThread", &thunk_CreateThread);
+    register_thunk("api-ms-win-core-synch-l1-2-0.dll", "WaitOnAddress", &thunk_WaitOnAddress);
+    register_thunk("api-ms-win-core-synch-l1-2-0.dll", "WakeByAddressSingle", &thunk_WakeByAddressSingle);
+    register_thunk("api-ms-win-core-synch-l1-2-0.dll", "WakeByAddressAll", &thunk_WakeByAddressAll);
+    register_thunk("kernelbase.dll", "WaitOnAddress", &thunk_WaitOnAddress);
+    register_thunk("kernelbase.dll", "WakeByAddressSingle", &thunk_WakeByAddressSingle);
+    register_thunk("kernelbase.dll", "WakeByAddressAll", &thunk_WakeByAddressAll);
+
+    // Audio
+    register_thunk("xaudio2_7.dll", "XAudio2Create", &thunk_XAudio2Create);
+    register_thunk("xaudio2_9.dll", "XAudio2Create", &thunk_XAudio2Create);
 
     // SEH Unwind (ntdll + kernel32 forwarder)
     register_thunk("kernel32.dll", "RtlLookupFunctionEntry", &thunk_RtlLookupFunctionEntry);

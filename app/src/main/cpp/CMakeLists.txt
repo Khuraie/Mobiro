@@ -31,6 +31,7 @@ if(ANDROID)
             mobiro_core
             game-activity::game-activity_static
             games-frame-pacing::swappy_static
+            aaudio
             android
             log
             dl

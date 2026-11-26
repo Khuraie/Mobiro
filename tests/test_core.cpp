@@ -1,3 +1,4 @@
+#include "audio/aaudio_xaudio_bridge.hpp"
 #include "cpu_mem/box64_bridge.hpp"
 #include "cpu_mem/guest_arena.hpp"
 #include "cpu_mem/guest_executor.hpp"
@@ -562,6 +563,140 @@ void test_dxvk_interop_and_ms_x64_marshaling() {
     bridge.shutdown();
 }
 
+void test_vfs_write_overlay_threads_wait_and_audio() {
+    const fs::path tmp = fs::temp_directory_path() / "mobiro_test_m3";
+    const fs::path ro_dir = tmp / "byof_ro";
+    const fs::path ov_dir = tmp / "saves_overlay";
+    fs::remove_all(tmp);
+    fs::create_directories(ro_dir);
+
+    {
+        std::ofstream orig(ro_dir / "config.xml", std::ios::binary);
+        orig << "ORIGINAL";
+    }
+
+    mobiro::validator::VfsMapper vfs;
+    assert(vfs.index_root(ro_dir.string()));
+    assert(vfs.set_write_overlay(ov_dir.string()));
+
+    // Path traversal must be rejected
+    std::string escaped;
+    assert(!vfs.resolve_for_write("..\\..\\evil.txt", escaped));
+
+    mobiro::mem::GuestArena arena;
+    assert(arena.reserve(0x0000000100000000ULL, 64ULL * 1024 * 1024));
+    mobiro::cpu::Box64Bridge bridge;
+    assert(bridge.initialize(&arena, &vfs));
+
+    // 1. Copy-on-write save file via CreateFileW(GENERIC_WRITE) + WriteFile + ReadFile
+    const uint16_t save_wpath[] = {'S','a','v','e','s','\\','S','0','0','0','0','.','s','l','2', 0};
+    uint64_t stack[8]{};
+    stack[5] = 2u; // CREATE_ALWAYS
+    x64emu_t emu{};
+    emu.rcx = reinterpret_cast<uint64_t>(save_wpath);
+    emu.rdx = 0x40000000u; // GENERIC_WRITE
+    emu.rsp = reinterpret_cast<uint64_t>(stack);
+    assert(bridge.invoke_thunk("kernel32.dll", "CreateFileW", &emu));
+    const uint64_t hwrite = emu.rax;
+    assert(hwrite != mobiro::win32::FileHandleTable::kInvalidHandle);
+
+    const char payload[] = "SEKIRO_SAVE_V1";
+    uint32_t written = 0;
+    emu = {};
+    emu.rcx = hwrite;
+    emu.rdx = reinterpret_cast<uint64_t>(payload);
+    emu.r8  = 14;
+    emu.r9  = reinterpret_cast<uint64_t>(&written);
+    assert(bridge.invoke_thunk("kernel32.dll", "WriteFile", &emu));
+    assert(emu.rax == 1 && written == 14);
+    emu.rcx = hwrite;
+    assert(bridge.invoke_thunk("kernel32.dll", "FlushFileBuffers", &emu));
+    assert(emu.rax == 1);
+    assert(bridge.invoke_thunk("kernel32.dll", "CloseHandle", &emu));
+    assert(emu.rax == 1);
+
+    // Ensure BYOF read-only directory remained untouched and overlay read returns new bytes
+    assert(!fs::exists(ro_dir / "saves" / "s0000.sl2"));
+    emu = {};
+    emu.rcx = reinterpret_cast<uint64_t>(save_wpath);
+    emu.rdx = 0x80000000u; // GENERIC_READ
+    assert(bridge.invoke_thunk("kernel32.dll", "CreateFileW", &emu));
+    const uint64_t hread = emu.rax;
+    assert(hread != mobiro::win32::FileHandleTable::kInvalidHandle);
+
+    char read_back[16]{};
+    uint32_t nread = 0;
+    emu = {};
+    emu.rcx = hread;
+    emu.rdx = reinterpret_cast<uint64_t>(read_back);
+    emu.r8  = 14;
+    emu.r9  = reinterpret_cast<uint64_t>(&nread);
+    assert(bridge.invoke_thunk("kernel32.dll", "ReadFile", &emu));
+    assert(emu.rax == 1 && nread == 14 && std::memcmp(read_back, payload, 14) == 0);
+    emu.rcx = hread;
+    assert(bridge.invoke_thunk("kernel32.dll", "CloseHandle", &emu));
+
+    // 2. CreateThread + WaitForSingleObject + WaitOnAddress/WakeByAddressSingle
+    std::atomic<uint32_t> futex_word{0};
+    std::atomic<uint64_t> saw_param{0};
+    bridge.threads().set_dispatch_callback(
+        [&](uintptr_t /*pc*/, uintptr_t param, mobiro::cpu::Win64Teb* teb) -> uint32_t {
+            assert(teb != nullptr && teb->unique_thread >= 200);
+            saw_param.store(param, std::memory_order_release);
+            futex_word.store(1, std::memory_order_release);
+            bridge.addr_wait().wake_single(&futex_word);
+            return 0;
+        });
+
+    uint32_t spawned_tid = 0;
+    uint64_t ct_stack[8]{};
+    ct_stack[6] = reinterpret_cast<uint64_t>(&spawned_tid); // arg6: lpThreadId
+    emu = {};
+    emu.r8  = 0x140001000ULL; // lpStartAddress
+    emu.r9  = 0xCAFE1234ULL;  // lpParameter
+    emu.rsp = reinterpret_cast<uint64_t>(ct_stack);
+    assert(bridge.invoke_thunk("kernel32.dll", "CreateThread", &emu));
+    const uint64_t hthread = emu.rax;
+    assert(hthread != 0 && spawned_tid >= 200);
+
+    uint32_t expected_zero = 0;
+    emu = {};
+    emu.rcx = reinterpret_cast<uint64_t>(&futex_word);
+    emu.rdx = reinterpret_cast<uint64_t>(&expected_zero);
+    emu.r8  = sizeof(uint32_t);
+    emu.r9  = 2000;
+    assert(bridge.invoke_thunk("kernelbase.dll", "WaitOnAddress", &emu));
+    assert(emu.rax == 1 && futex_word.load() == 1 && saw_param.load() == 0xCAFE1234ULL);
+
+    emu = {};
+    emu.rcx = hthread;
+    emu.rdx = 2000;
+    assert(bridge.invoke_thunk("kernel32.dll", "WaitForSingleObject", &emu));
+    assert(emu.rax == 0);
+    emu.rcx = hthread;
+    assert(bridge.invoke_thunk("kernel32.dll", "CloseHandle", &emu));
+    assert(emu.rax == 1);
+
+    // 3. XAudio2Create -> AAudioXAudioBridge lock-free PCM ring buffer
+    void* xa2_ptr = nullptr;
+    emu = {};
+    emu.rcx = reinterpret_cast<uint64_t>(&xa2_ptr);
+    assert(bridge.invoke_thunk("xaudio2_7.dll", "XAudio2Create", &emu));
+    assert(emu.rax == 0 && xa2_ptr != nullptr);
+
+    auto& audio = mobiro::audio::AAudioXAudioBridge::global();
+    assert(audio.is_running());
+    const float pcm_in[4] = {0.25f, -0.25f, 0.5f, -0.5f};
+    assert(audio.submit_pcm_float(pcm_in, 4) == 4);
+    float pcm_out[6]{1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+    assert(audio.drain_pcm_float(pcm_out, 6) == 4);
+    assert(pcm_out[0] == 0.25f && pcm_out[3] == -0.5f && pcm_out[4] == 0.0f && pcm_out[5] == 0.0f);
+    audio.stop();
+
+    bridge.shutdown();
+    fs::remove_all(tmp);
+}
+
 } // namespace
 
 int main() {
@@ -570,6 +705,7 @@ int main() {
     test_dxvk_config_and_topology();
     test_x86_64_guest_execution_and_seh();
     test_dxvk_interop_and_ms_x64_marshaling();
+    test_vfs_write_overlay_threads_wait_and_audio();
     std::cout << "All Mobiro core unit tests passed.\n";
     return 0;
 }
