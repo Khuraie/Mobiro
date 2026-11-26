@@ -57,7 +57,18 @@ class MainActivity : GameActivity() {
         when {
             savedPath != null && File(savedPath, "sekiro.exe").isFile -> startNativeContainer(savedPath)
             File(defaultDir, "sekiro.exe").isFile -> startNativeContainer(defaultDir.absolutePath)
-            else -> pickByofDirectory.launch(null)
+            else -> {
+                try {
+                    pickByofDirectory.launch(null)
+                } catch (_: android.content.ActivityNotFoundException) {
+                    Log.w(TAG, "No SAF picker available; copy BYOF files to ${defaultDir.absolutePath}")
+                    Toast.makeText(
+                        this,
+                        "Copy Sekiro PC files into ${defaultDir.absolutePath}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
         }
     }
 

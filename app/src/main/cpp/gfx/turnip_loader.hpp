@@ -24,6 +24,12 @@ inline VulkanDriverHandle load_vulkan_driver(const std::string& native_lib_dir) 
 #if defined(__linux__) || defined(__ANDROID__)
     const std::string turnip_path = native_lib_dir + "/libvulkan_freedreno.so";
     void* h = dlopen(turnip_path.c_str(), RTLD_NOW | RTLD_LOCAL);
+    std::string used_path = turnip_path;
+    if (!h) {
+        // Android extractNativeLibs="false" keeps .so inside APK; bare soname resolves via linker namespace
+        h = dlopen("libvulkan_freedreno.so", RTLD_NOW | RTLD_LOCAL);
+        used_path = "libvulkan_freedreno.so";
+    }
     if (h) {
         auto* fn = reinterpret_cast<PfnGetInstanceProcAddr>(dlsym(h, "vk_icdGetInstanceProcAddr"));
         if (!fn) fn = reinterpret_cast<PfnGetInstanceProcAddr>(dlsym(h, "vkGetInstanceProcAddr"));
@@ -31,7 +37,7 @@ inline VulkanDriverHandle load_vulkan_driver(const std::string& native_lib_dir) 
             res.dl_handle = h;
             res.get_instance_proc_addr = fn;
             res.using_turnip = true;
-            res.loaded_path = turnip_path;
+            res.loaded_path = used_path;
             return res;
         }
         dlclose(h);

@@ -87,7 +87,9 @@ public:
         const std::string d3d11_path = native_lib_dir + "/libdxvk_d3d11.so";
 
         dxgi_dl_  = dlopen(dxgi_path.c_str(), RTLD_NOW | RTLD_LOCAL);
+        if (!dxgi_dl_) dxgi_dl_ = dlopen("libdxvk_dxgi.so", RTLD_NOW | RTLD_LOCAL);
         d3d11_dl_ = dlopen(d3d11_path.c_str(), RTLD_NOW | RTLD_LOCAL);
+        if (!d3d11_dl_) d3d11_dl_ = dlopen("libdxvk_d3d11.so", RTLD_NOW | RTLD_LOCAL);
 
         if (dxgi_dl_) {
             backend_.create_dxgi_factory1 =
