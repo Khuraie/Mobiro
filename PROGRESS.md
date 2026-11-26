@@ -7,6 +7,7 @@
 ## Log Entries
 
 ### Increment 10 — M8: Mesa Turnip `arm64-v8a` Green, Generated Win64→ARM64 D3D11/DXGI COM Bridge, Extended Win32/DirectInput8 Shims, Vulkan HUD Draw Pass & `spirv-val` CI (2026-11-27)
+- **Commit:** `eaa92c2` (CI Run `45864147018` — Linux GCC tests + Khronos `spirv-val` 37s, Android ARM64 APK 1m24s)
 - **Status:** Implemented & verified (local MSVC 2022 + GitHub Actions Linux GCC + `spirv-val` + Android ARM64 NDK)
 - **Changes:**
   - Verified upstream **Mesa Turnip ICD (`libvulkan_freedreno.so`) `arm64-v8a` cross-build passed and uploaded artifact** on GitHub Actions NDK `27.2.12479018` (Run `45863055424`), meaning both Box64 and Mesa Turnip now build cleanly from upstream source.

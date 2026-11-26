@@ -19,6 +19,7 @@ function Sync-Repo($Name, $Url, $Branch) {
 
 Sync-Repo "box64" "https://github.com/ptitSeb/box64.git" "main"
 Sync-Repo "dxvk"  "https://github.com/doitsujin/dxvk.git"  "master"
+git -C (Join-Path $TpDir "dxvk") submodule update --init --recursive --depth 1
 Sync-Repo "mesa"  "https://gitlab.freedesktop.org/mesa/mesa.git" "main"
 
 Write-Host "[Mobiro] Open-source third-party sources ready in $TpDir"

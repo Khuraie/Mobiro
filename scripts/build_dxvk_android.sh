@@ -30,6 +30,7 @@ c = '$BIN/aarch64-linux-android31-clang'
 cpp = '$BIN/aarch64-linux-android31-clang++'
 ar = '$BIN/llvm-ar'
 strip = '$BIN/llvm-strip'
+pkg-config = 'false'
 
 [host_machine]
 system = 'android'

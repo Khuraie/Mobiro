@@ -20,6 +20,7 @@ clone_or_update() {
 
 clone_or_update box64 "https://github.com/ptitSeb/box64.git" "main"
 clone_or_update dxvk  "https://github.com/doitsujin/dxvk.git" "master"
+git -C "$TP_DIR/dxvk" submodule update --init --recursive --depth 1
 clone_or_update mesa  "https://gitlab.freedesktop.org/mesa/mesa.git" "main"
 
 echo "[Mobiro] Open-source third-party sources ready in $TP_DIR"
