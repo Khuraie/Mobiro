@@ -135,15 +135,18 @@ private:
             const auto* pc = reinterpret_cast<const uint8_t*>(emu.rip);
             const uint8_t b0 = pc[0];
 
-            // NativeBridgeStub trap (0xCC 'M' 'B' <8-byte thunk_ptr> 0xC3)
-            if (b0 == 0xCC && pc[1] == 'M' && pc[2] == 'B') {
+            // Box64-compatible NativeBridgeStub (0xCC 'S' 'C' <wrapper_ptr> <thunk_ptr> 0xC3)
+            if (b0 == 0xCC && pc[1] == 'S' && pc[2] == 'C') {
                 const auto* stub = reinterpret_cast<const NativeBridgeStub*>(pc);
-                auto fn = reinterpret_cast<NativeThunkFn>(stub->thunk_ptr);
-                if (!fn) {
-                    res.error = "Null native thunk pointer in bridge stub.";
+                if (stub->wrapper_ptr == 0) {
+                    res.ok = true;
+                    res.exit_rax = emu.rax;
+                    res.steps_executed = step;
                     return res;
                 }
-                fn(&emu);
+                using WrapperFn = void (*)(x64emu_t*, uintptr_t);
+                auto wrapper = reinterpret_cast<WrapperFn>(stub->wrapper_ptr);
+                wrapper(&emu, static_cast<uintptr_t>(stub->thunk_ptr));
                 ++res.thunks_dispatched;
                 // Execute implicit RET
                 uint64_t ret_addr = 0;

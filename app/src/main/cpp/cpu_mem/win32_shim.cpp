@@ -830,6 +830,194 @@ void thunk_DirectInput8Create(x64emu_t* emu) {
     reg_rax(emu) = static_cast<uint64_t>(static_cast<uint32_t>(hr));
 }
 
+// --- M11: Condition Variables, Semaphores, WaitForMultipleObjects & MSVC CRT/ntdll ---
+
+void thunk_InitializeConditionVariable(x64emu_t* emu) {
+    auto* p = reinterpret_cast<uint64_t*>(reg_rcx(emu));
+    if (p) *p = 0;
+}
+
+void thunk_SleepConditionVariableSRW(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    if (!b) { reg_rax(emu) = 0; return; }
+    const bool shared = (static_cast<uint32_t>(reg_r9(emu)) & 1u) != 0; // CONDITION_VARIABLE_LOCKMODE_SHARED
+    const bool ok = b->cond_vars().sleep_srw(
+        static_cast<uintptr_t>(reg_rcx(emu)), b->srw_locks(),
+        static_cast<uintptr_t>(reg_rdx(emu)), static_cast<uint32_t>(reg_r8(emu)), shared);
+    if (!ok) {
+        if (auto* teb = current_teb(emu)) teb->last_error = 1460u; // ERROR_TIMEOUT
+    }
+    reg_rax(emu) = ok ? 1ULL : 0ULL;
+}
+
+void thunk_SleepConditionVariableCS(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    if (!b) { reg_rax(emu) = 0; return; }
+    const bool ok = b->cond_vars().sleep_cs(
+        static_cast<uintptr_t>(reg_rcx(emu)), b->crit_sections(),
+        static_cast<uintptr_t>(reg_rdx(emu)), static_cast<uint32_t>(reg_r8(emu)));
+    if (!ok) {
+        if (auto* teb = current_teb(emu)) teb->last_error = 1460u;
+    }
+    reg_rax(emu) = ok ? 1ULL : 0ULL;
+}
+
+void thunk_WakeConditionVariable(x64emu_t* emu) {
+    if (auto* b = Box64Bridge::instance()) b->cond_vars().wake_one(static_cast<uintptr_t>(reg_rcx(emu)));
+}
+
+void thunk_WakeAllConditionVariable(x64emu_t* emu) {
+    if (auto* b = Box64Bridge::instance()) b->cond_vars().wake_all(static_cast<uintptr_t>(reg_rcx(emu)));
+}
+
+void thunk_CreateSemaphore(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    if (!b) { reg_rax(emu) = 0; return; }
+    reg_rax(emu) = b->events().create_semaphore(
+        static_cast<int32_t>(reg_rdx(emu)), static_cast<int32_t>(reg_r8(emu)));
+}
+
+void thunk_ReleaseSemaphore(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    if (!b) { reg_rax(emu) = 0; return; }
+    auto* prev = reinterpret_cast<int32_t*>(reg_r8(emu));
+    reg_rax(emu) = b->events().release_semaphore(
+        reg_rcx(emu), static_cast<int32_t>(reg_rdx(emu)), prev) ? 1ULL : 0ULL;
+}
+
+void thunk_WaitForMultipleObjects(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    const uint32_t count = static_cast<uint32_t>(reg_rcx(emu));
+    const auto* handles = reinterpret_cast<const uint64_t*>(reg_rdx(emu));
+    const bool wait_all = (reg_r8(emu) != 0);
+    const uint32_t timeout_ms = static_cast<uint32_t>(reg_r9(emu));
+    if (!b || !handles || count == 0 || count > 64) {
+        reg_rax(emu) = win32::EventTable::kWaitFailed;
+        return;
+    }
+    if (wait_all) {
+        for (uint32_t i = 0; i < count; ++i) {
+            const uint32_t r = b->threads().is_thread_handle(handles[i])
+                ? b->threads().wait_single(handles[i], timeout_ms)
+                : b->events().wait_single(handles[i], timeout_ms);
+            if (r != win32::EventTable::kWaitObject0) { reg_rax(emu) = r; return; }
+        }
+        reg_rax(emu) = win32::EventTable::kWaitObject0;
+        return;
+    }
+    const auto deadline = (timeout_ms == win32::EventTable::kInfinite)
+        ? std::chrono::steady_clock::time_point::max()
+        : (std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms));
+    for (;;) {
+        for (uint32_t i = 0; i < count; ++i) {
+            const uint32_t r = b->threads().is_thread_handle(handles[i])
+                ? b->threads().wait_single(handles[i], 0)
+                : b->events().wait_single(handles[i], 0);
+            if (r == win32::EventTable::kWaitObject0) { reg_rax(emu) = i; return; }
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            reg_rax(emu) = win32::EventTable::kWaitTimeout;
+            return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
+void thunk_GetCurrentProcess(x64emu_t* emu) { reg_rax(emu) = ~0ULL; }
+void thunk_GetCurrentThread(x64emu_t* emu)  { reg_rax(emu) = ~1ULL; }
+void thunk_GetStdHandle(x64emu_t* emu)      { reg_rax(emu) = 0x10ULL + (reg_rcx(emu) & 0xFFULL); }
+void thunk_GetFileType(x64emu_t* emu)       { reg_rax(emu) = 2ULL; } // FILE_TYPE_CHAR
+void thunk_GetACP(x64emu_t* emu)            { reg_rax(emu) = 65001ULL; } // CP_UTF8
+void thunk_GetCPInfo(x64emu_t* emu) {
+    auto* out = reinterpret_cast<uint8_t*>(reg_rdx(emu));
+    if (!out) { reg_rax(emu) = 0; return; }
+    std::memset(out, 0, 20); // sizeof(CPINFO)
+    const uint32_t max_char = 4;
+    std::memcpy(out, &max_char, 4);
+    out[4] = '?';
+    reg_rax(emu) = 1ULL;
+}
+void thunk_GetEnvironmentStringsW(x64emu_t* emu) {
+    static const uint16_t kEmptyEnv[2] = {0, 0};
+    reg_rax(emu) = reinterpret_cast<uintptr_t>(kEmptyEnv);
+}
+void thunk_GetEnvironmentVariableW(x64emu_t* emu) {
+    if (auto* teb = current_teb(emu)) teb->last_error = 203u; // ERROR_ENVVAR_NOT_FOUND
+    reg_rax(emu) = 0ULL;
+}
+void thunk_GetModuleHandleExW(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    auto* out_mod = reinterpret_cast<uintptr_t*>(reg_r8(emu));
+    if (!b || !out_mod) { reg_rax(emu) = 0; return; }
+    const uint32_t flags = static_cast<uint32_t>(reg_rcx(emu));
+    const uint64_t name_or_addr = reg_rdx(emu);
+    if ((flags & 0x04u) != 0 || name_or_addr == 0) { // GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+        *out_mod = b->main_module_base();
+        reg_rax(emu) = (*out_mod != 0) ? 1ULL : 0ULL;
+        return;
+    }
+    const std::string name = win32::utf16le_to_utf8(reinterpret_cast<const uint16_t*>(name_or_addr));
+    uintptr_t h = b->modules().find_module(name);
+    if (!h && b->has_dll_thunks(name)) h = b->modules().get_or_register_native(name);
+    *out_mod = h;
+    reg_rax(emu) = (h != 0) ? 1ULL : 0ULL;
+}
+void thunk_GetProcessAffinityMask(x64emu_t* emu) {
+    auto* proc_mask = reinterpret_cast<uint64_t*>(reg_rdx(emu));
+    auto* sys_mask  = reinterpret_cast<uint64_t*>(reg_r8(emu));
+    if (proc_mask) *proc_mask = 0xFFULL;
+    if (sys_mask)  *sys_mask  = 0xFFULL;
+    reg_rax(emu) = 1ULL;
+}
+void thunk_DeleteFileW(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    const std::string path = win32::utf16le_to_utf8(reinterpret_cast<const uint16_t*>(reg_rcx(emu)));
+    std::string host;
+    // Only deletes inside writable save overlay (never mutates read-only BYOF directory)
+    if (!b || !b->vfs() || !b->vfs()->resolve_for_write(path, host)) { reg_rax(emu) = 0; return; }
+    std::error_code ec;
+    const bool removed = std::filesystem::remove(host, ec);
+    b->vfs()->erase_overlay_entry(path);
+    reg_rax(emu) = removed ? 1ULL : 0ULL;
+}
+void thunk_MoveFileExW(x64emu_t* emu) {
+    auto* b = Box64Bridge::instance();
+    const std::string src_p = win32::utf16le_to_utf8(reinterpret_cast<const uint16_t*>(reg_rcx(emu)));
+    const std::string dst_p = win32::utf16le_to_utf8(reinterpret_cast<const uint16_t*>(reg_rdx(emu)));
+    std::string src_h, dst_h;
+    if (!b || !b->vfs() || !b->vfs()->resolve(src_p, src_h) || !b->vfs()->resolve_for_write(dst_p, dst_h)) {
+        reg_rax(emu) = 0;
+        return;
+    }
+    std::error_code ec;
+    std::filesystem::rename(src_h, dst_h, ec);
+    if (ec) {
+        ec.clear();
+        std::filesystem::copy_file(src_h, dst_h, std::filesystem::copy_options::overwrite_existing, ec);
+    } else {
+        b->vfs()->erase_overlay_entry(src_p);
+    }
+    reg_rax(emu) = ec ? 0ULL : 1ULL;
+}
+void thunk_GetCurrentDirectoryW(x64emu_t* emu) {
+    const uint32_t cap = static_cast<uint32_t>(reg_rcx(emu));
+    auto* dst = reinterpret_cast<uint16_t*>(reg_rdx(emu));
+    static const uint16_t kDirW[] = {'C',':','\\','S','e','k','i','r','o', 0};
+    constexpr uint32_t kLen = 9;
+    if (!dst || cap <= kLen) { reg_rax(emu) = kLen + 1; return; }
+    std::memcpy(dst, kDirW, (kLen + 1) * sizeof(uint16_t));
+    reg_rax(emu) = kLen;
+}
+void thunk_GetTempPathW(x64emu_t* emu) {
+    const uint32_t cap = static_cast<uint32_t>(reg_rcx(emu));
+    auto* dst = reinterpret_cast<uint16_t*>(reg_rdx(emu));
+    static const uint16_t kTmpW[] = {'C',':','\\','T','e','m','p','\\', 0};
+    constexpr uint32_t kLen = 8;
+    if (!dst || cap <= kLen) { reg_rax(emu) = kLen + 1; return; }
+    std::memcpy(dst, kTmpW, (kLen + 1) * sizeof(uint16_t));
+    reg_rax(emu) = kLen;
+}
+
 // --- Input ---
 
 void thunk_XInputGetState(x64emu_t* emu) {
@@ -961,6 +1149,7 @@ void Box64Bridge::shutdown() {
     files_.close_all();
     srw_locks_.clear();
     crit_sections_.clear();
+    cond_vars_.clear();
     events_.clear();
     modules_.clear();
     window_.clear();
@@ -987,6 +1176,7 @@ uintptr_t Box64Bridge::resolve_import(const std::string& dll_lower, const std::s
 
     NativeBridgeStub& stub = stub_pool_[stub_count_++];
     stub = NativeBridgeStub{};
+    stub.wrapper_ptr = reinterpret_cast<uint64_t>(&mobiro_native_thunk_wrapper);
     stub.thunk_ptr = reinterpret_cast<uint64_t>(it->second);
     return reinterpret_cast<uintptr_t>(&stub);
 }
@@ -1161,6 +1351,54 @@ void Box64Bridge::register_default_win32_thunks() {
     register_thunk("advapi32.dll", "RegQueryValueExA", &thunk_RegNotFound);
     register_thunk("advapi32.dll", "RegCloseKey", &thunk_ReturnZero);
     register_thunk("dinput8.dll", "DirectInput8Create", &thunk_DirectInput8Create);
+
+    // M11: Condition Variables, Semaphores, WaitForMultipleObjects, MSVC CRT & ntdll
+    register_thunk("kernel32.dll", "InitializeConditionVariable", &thunk_InitializeConditionVariable);
+    register_thunk("kernel32.dll", "SleepConditionVariableSRW", &thunk_SleepConditionVariableSRW);
+    register_thunk("kernel32.dll", "SleepConditionVariableCS", &thunk_SleepConditionVariableCS);
+    register_thunk("kernel32.dll", "WakeConditionVariable", &thunk_WakeConditionVariable);
+    register_thunk("kernel32.dll", "WakeAllConditionVariable", &thunk_WakeAllConditionVariable);
+    register_thunk("ntdll.dll", "RtlInitializeSRWLock", &thunk_InitializeSRWLock);
+    register_thunk("ntdll.dll", "RtlAcquireSRWLockExclusive", &thunk_AcquireSRWLockExclusive);
+    register_thunk("ntdll.dll", "RtlReleaseSRWLockExclusive", &thunk_ReleaseSRWLockExclusive);
+    register_thunk("ntdll.dll", "RtlAcquireSRWLockShared", &thunk_AcquireSRWLockShared);
+    register_thunk("ntdll.dll", "RtlReleaseSRWLockShared", &thunk_ReleaseSRWLockShared);
+    register_thunk("ntdll.dll", "RtlSleepConditionVariableSRW", &thunk_SleepConditionVariableSRW);
+    register_thunk("ntdll.dll", "RtlWakeConditionVariable", &thunk_WakeConditionVariable);
+    register_thunk("ntdll.dll", "RtlWakeAllConditionVariable", &thunk_WakeAllConditionVariable);
+    register_thunk("kernel32.dll", "CreateSemaphoreW", &thunk_CreateSemaphore);
+    register_thunk("kernel32.dll", "CreateSemaphoreA", &thunk_CreateSemaphore);
+    register_thunk("kernel32.dll", "ReleaseSemaphore", &thunk_ReleaseSemaphore);
+    register_thunk("kernel32.dll", "WaitForMultipleObjects", &thunk_WaitForMultipleObjects);
+    register_thunk("kernel32.dll", "GetCurrentProcess", &thunk_GetCurrentProcess);
+    register_thunk("kernel32.dll", "GetCurrentThread", &thunk_GetCurrentThread);
+    register_thunk("kernel32.dll", "GetProcessAffinityMask", &thunk_GetProcessAffinityMask);
+    register_thunk("kernel32.dll", "GetStdHandle", &thunk_GetStdHandle);
+    register_thunk("kernel32.dll", "GetFileType", &thunk_GetFileType);
+    register_thunk("kernel32.dll", "GetConsoleMode", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "WriteConsoleW", &thunk_ReturnTrue);
+    register_thunk("kernel32.dll", "WriteConsoleA", &thunk_ReturnTrue);
+    register_thunk("kernel32.dll", "GetACP", &thunk_GetACP);
+    register_thunk("kernel32.dll", "GetOEMCP", &thunk_GetACP);
+    register_thunk("kernel32.dll", "IsValidCodePage", &thunk_ReturnTrue);
+    register_thunk("kernel32.dll", "GetCPInfo", &thunk_GetCPInfo);
+    register_thunk("kernel32.dll", "GetEnvironmentStringsW", &thunk_GetEnvironmentStringsW);
+    register_thunk("kernel32.dll", "FreeEnvironmentStringsW", &thunk_ReturnTrue);
+    register_thunk("kernel32.dll", "GetEnvironmentVariableW", &thunk_GetEnvironmentVariableW);
+    register_thunk("kernel32.dll", "GetEnvironmentVariableA", &thunk_GetEnvironmentVariableW);
+    register_thunk("kernel32.dll", "GetModuleHandleExW", &thunk_GetModuleHandleExW);
+    register_thunk("kernel32.dll", "GetSystemTimePreciseAsFileTime", &thunk_GetSystemTimeAsFileTime);
+    register_thunk("kernel32.dll", "HeapSetInformation", &thunk_ReturnTrue);
+    register_thunk("kernel32.dll", "HeapQueryInformation", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "DeleteFileW", &thunk_DeleteFileW);
+    register_thunk("kernel32.dll", "MoveFileExW", &thunk_MoveFileExW);
+    register_thunk("kernel32.dll", "GetCurrentDirectoryW", &thunk_GetCurrentDirectoryW);
+    register_thunk("kernel32.dll", "SetCurrentDirectoryW", &thunk_ReturnTrue);
+    register_thunk("kernel32.dll", "GetTempPathW", &thunk_GetTempPathW);
+    register_thunk("kernel32.dll", "ExitProcess", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "TerminateProcess", &thunk_ReturnTrue);
+    register_thunk("ws2_32.dll", "WSAStartup", &thunk_ReturnZero);
+    register_thunk("ws2_32.dll", "WSACleanup", &thunk_ReturnZero);
 }
 
 } // namespace mobiro::cpu

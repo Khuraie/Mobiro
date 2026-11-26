@@ -171,6 +171,7 @@ private:
     template <size_t... Is>
     void init_vtables(std::index_sequence<Is...>) {
         ((stubs_[Is] = cpu::NativeBridgeStub{},
+          stubs_[Is].wrapper_ptr = reinterpret_cast<uint64_t>(&cpu::mobiro_native_thunk_wrapper),
           stubs_[Is].thunk_ptr = reinterpret_cast<uint64_t>(&dispatch_slot<Is>),
           vtable_ptrs_[Is] = reinterpret_cast<uintptr_t>(&stubs_[Is])), ...);
     }

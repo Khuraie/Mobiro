@@ -3,6 +3,8 @@
 #include "../validator/vfs_mapper.hpp"
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -201,6 +203,7 @@ public:
     void release_exclusive(uintptr_t guest_srw) { get_or_create(guest_srw)->unlock(); }
     void acquire_shared(uintptr_t guest_srw)    { get_or_create(guest_srw)->lock_shared(); }
     void release_shared(uintptr_t guest_srw)    { get_or_create(guest_srw)->unlock_shared(); }
+    std::shared_mutex* native_lock(uintptr_t guest_srw) { return get_or_create(guest_srw); }
 
     void clear() {
         std::lock_guard<std::mutex> lock(mu_);
@@ -229,6 +232,7 @@ public:
     void enter(uintptr_t cs)      { if (cs) get_or_create(cs)->lock(); }
     bool try_enter(uintptr_t cs)  { return cs && get_or_create(cs)->try_lock(); }
     void leave(uintptr_t cs)      { if (cs) get_or_create(cs)->unlock(); }
+    std::recursive_mutex* native_lock(uintptr_t cs) { return cs ? get_or_create(cs) : nullptr; }
 
     void destroy(uintptr_t cs) {
         std::lock_guard<std::mutex> lock(mu_);
@@ -255,6 +259,69 @@ private:
 
     std::mutex mu_;
     std::unordered_map<uintptr_t, std::recursive_mutex*> locks_;
+};
+
+// Maps guest CONDITION_VARIABLE* addresses to condition_variable_any (supports both SRWLOCK & CRITICAL_SECTION)
+class ConditionVariableTable {
+public:
+    ~ConditionVariableTable() { clear(); }
+
+    void wake_one(uintptr_t cv) {
+        if (auto* c = get_or_create(cv)) c->notify_one();
+    }
+    void wake_all(uintptr_t cv) {
+        if (auto* c = get_or_create(cv)) c->notify_all();
+    }
+
+    bool sleep_srw(uintptr_t cv, SrwLockTable& srws, uintptr_t srw, uint32_t timeout_ms, bool shared) {
+        auto* c = get_or_create(cv);
+        auto* m = srws.native_lock(srw);
+        if (!c || !m) return false;
+        if (shared) {
+            std::shared_lock<std::shared_mutex> lk(*m, std::adopt_lock);
+            bool ok = true;
+            if (timeout_ms == 0xFFFFFFFFu) { c->wait(lk); }
+            else { ok = (c->wait_for(lk, std::chrono::milliseconds(timeout_ms)) == std::cv_status::no_timeout); }
+            lk.release();
+            return ok;
+        }
+        std::unique_lock<std::shared_mutex> lk(*m, std::adopt_lock);
+        bool ok = true;
+        if (timeout_ms == 0xFFFFFFFFu) { c->wait(lk); }
+        else { ok = (c->wait_for(lk, std::chrono::milliseconds(timeout_ms)) == std::cv_status::no_timeout); }
+        lk.release();
+        return ok;
+    }
+
+    bool sleep_cs(uintptr_t cv, CriticalSectionTable& css, uintptr_t cs, uint32_t timeout_ms) {
+        auto* c = get_or_create(cv);
+        auto* m = css.native_lock(cs);
+        if (!c || !m) return false;
+        std::unique_lock<std::recursive_mutex> lk(*m, std::adopt_lock);
+        bool ok = true;
+        if (timeout_ms == 0xFFFFFFFFu) { c->wait(lk); }
+        else { ok = (c->wait_for(lk, std::chrono::milliseconds(timeout_ms)) == std::cv_status::no_timeout); }
+        lk.release();
+        return ok;
+    }
+
+    void clear() {
+        std::lock_guard<std::mutex> lock(mu_);
+        for (auto& [_, c] : cvs_) delete c;
+        cvs_.clear();
+    }
+
+private:
+    std::condition_variable_any* get_or_create(uintptr_t key) {
+        if (!key) return nullptr;
+        std::lock_guard<std::mutex> lock(mu_);
+        auto& ptr = cvs_[key];
+        if (!ptr) ptr = new std::condition_variable_any();
+        return ptr;
+    }
+
+    std::mutex mu_;
+    std::unordered_map<uintptr_t, std::condition_variable_any*> cvs_;
 };
 
 } // namespace mobiro::win32

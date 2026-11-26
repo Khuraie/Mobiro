@@ -58,14 +58,31 @@ public:
         const std::string key = strip_prefix(normalize(guest_path));
         std::lock_guard<std::mutex> lock(mu_);
         if (auto oit = overlay_map_.find(key); oit != overlay_map_.end()) {
-            out_host_path = oit->second;
-            return true;
+            std::error_code ec;
+            if (std::filesystem::exists(oit->second, ec)) {
+                out_host_path = oit->second;
+                return true;
+            }
+        }
+        if (!overlay_root_.empty() && !key.empty() && key.find("..") == std::string::npos) {
+            const auto direct = overlay_root_ / std::filesystem::path(key);
+            std::error_code ec;
+            if (std::filesystem::exists(direct, ec)) {
+                out_host_path = direct.string();
+                return true;
+            }
         }
         if (auto it = map_.find(key); it != map_.end()) {
             out_host_path = it->second;
             return true;
         }
         return false;
+    }
+
+    void erase_overlay_entry(const std::string& guest_path) {
+        const std::string key = strip_prefix(normalize(guest_path));
+        std::lock_guard<std::mutex> lock(mu_);
+        overlay_map_.erase(key);
     }
 
     // Resolves a target path inside the writable overlay directory (creating parent dirs).

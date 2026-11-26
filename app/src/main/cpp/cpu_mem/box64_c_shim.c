@@ -22,6 +22,15 @@ uintptr_t mobiro_box64_teb(const x64emu_t* emu) {
     return emu ? emu->segs_offs[_GS] : 0;
 }
 
+// Native Box64 exit bridge (`0xCC 'S' 'C' 0ULL`): when a guest function returns here,
+// Box64's ARM64 Dynarec and x64Int3 set `emu->quit = 1` and cleanly return control to C.
+static const uint8_t g_box64_exit_stub[32] __attribute__((aligned(32))) = {
+    0xCC, 'S', 'C',
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0xC3
+};
+
 int mobiro_box64_call_fn(uintptr_t fn_va,
                          uint64_t rcx,
                          uint64_t rdx,
@@ -31,6 +40,7 @@ int mobiro_box64_call_fn(uintptr_t fn_va,
                          uintptr_t teb_va,
                          uint64_t return_sentinel,
                          uint64_t* out_rax) {
+    (void)return_sentinel;
     if (!fn_va || !stack_base || stack_size < 0x1000u) return 0;
     if (!my_context) {
         my_context = NewBox64Context(0);
@@ -43,7 +53,8 @@ int mobiro_box64_call_fn(uintptr_t fn_va,
 
     uint64_t rsp = ((uint64_t)stack_base - 0x100ULL) & ~0xFULL;
     rsp -= 8;
-    memcpy((void*)(uintptr_t)rsp, &return_sentinel, 8);
+    const uint64_t exit_addr = (uint64_t)(uintptr_t)g_box64_exit_stub;
+    memcpy((void*)(uintptr_t)rsp, &exit_addr, 8);
 
     emu->regs[_SP].q[0] = rsp;
     emu->regs[_CX].q[0] = rcx;

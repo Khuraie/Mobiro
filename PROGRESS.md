@@ -6,6 +6,17 @@
 
 ## Log Entries
 
+### Increment 13 — M11: Box64 `onebridge_t` Live Native-Thunk Dispatch, Prime-Core Guest Entry Thread & `ntdll`/CRT Sync Expansion (2026-11-27)
+- **Status:** Implemented & verified (local MSVC 2022 + GitHub Actions Linux GCC/`spirv-val` + Android ARM64 NDK)
+- **Changes:**
+  - Upgraded `NativeBridgeStub` (`app/src/main/cpp/cpu_mem/box64_bridge.hpp`) to exact 32-byte upstream Box64 `onebridge_t` binary layout (`0xCC 'S' 'C' <wrapper_ptr> <thunk_ptr> 0xC3`, static-asserted offsets + `alignas(32)`) and added `mobiro_native_thunk_wrapper(x64emu_t*, uintptr_t)` so Box64's ARM64 Dynarec (`dynarec_arm64_00.c`) and `x64Int3` natively dispatch every IAT thunk and all 204 D3D11/DXGI COM vtable slots with zero patches to Box64.
+  - Added Box64-native clean exit stub (`0xCC 'S' 'C' 0ULL`) in `app/src/main/cpp/cpu_mem/box64_c_shim.c` so guest `RET` cleanly sets `emu->quit = 1` and returns `RAX` to C++.
+  - Wired Prime-core `guest_thread` launch (`GuestExecutor::run_entry`) into `android_main` (`app/src/main/cpp/runtime_main.cpp`) once BYOF PE64 mapping and `ANativeWindow` are both ready, with clean `WM_QUIT` + thread join on Android teardown (removing duplicate TLS callback execution).
+  - Implemented `ConditionVariableTable` (`std::condition_variable_any` supporting both `SRWLOCK` and `CRITICAL_SECTION`), semaphores (`CreateSemaphoreW/A`, `ReleaseSemaphore`), `WaitForMultipleObjects`, `ntdll.dll!Rtl*SRWLock`/`Rtl*ConditionVariable`, and 30+ MSVC CRT & VFS-safe file shims (`GetCurrentProcess/Thread`, `GetACP`/`GetCPInfo`, `GetModuleHandleExW`, `GetCurrentDirectoryW`, `GetTempPathW`, overlay-scoped `MoveFileExW`/`DeleteFileW`, `ws2_32.dll!WSAStartup/WSACleanup`).
+  - Added `test_m11_box64_onebridge_condvar_sem_and_crt` in `tests/test_core.cpp` (12/12 test suites passing).
+
+---
+
 ### Increment 12 — M10: Android `ANativeWindow` DXVK WSI Backend (`VK_KHR_android_surface`), Embedded Box64 PIC Static Core & XMM3 Float COM Forwarding (2026-11-27)
 - **Status:** Implemented & verified (local MSVC 2022 + GitHub Actions Linux GCC/`spirv-val` + Android ARM64 NDK + upstream DXVK/Box64 full-stack rebuild)
 - **Changes:**
@@ -146,4 +157,4 @@
 ---
 
 ## Upcoming Increments
-- **Increment 13 (M11 — Steam/FMOD/Game-Specific Import Coverage & Live Adreno 7xx/8xx Boot):** Add clean-room BYOF-compliant Steam stub / missing Win32 CRT & `ntdll` imports discovered against real user-supplied `Sekiro.exe`, attach the `TouchOverlayVk` Vulkan draw pass to the swapchain command buffer, and validate first live Adreno 7xx/8xx handset boot.
+- **Increment 14 (M12 — In-Swapchain Vulkan Touch HUD Composition & On-Device Adreno 7xx/8xx Boot):** Bind `TouchOverlayVk` into active Vulkan swapchain presentation, add runtime diagnostics for unresolved PE64 imports & guest crash telemetry, and validate first real-device Adreno 7xx/8xx boot with user-supplied `Sekiro.exe`.

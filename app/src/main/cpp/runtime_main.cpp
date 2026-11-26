@@ -25,6 +25,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <string>
+#include <thread>
 
 namespace {
 
@@ -43,6 +44,8 @@ struct MobiroRuntimeState {
     mobiro::sched::ThreadBalancer balancer;
     std::atomic<int> target_fps{60};
     std::atomic<bool> configured{false};
+    std::atomic<bool> guest_started{false};
+    std::thread guest_thread;
 };
 
 MobiroRuntimeState g_rt;
@@ -231,7 +234,6 @@ Java_com_mobiro_runtime_MainActivity_nativeConfigureAndValidate(
         return env->NewStringUTF("Failed to initialize Win64 TEB/PEB.");
     }
     g_rt.box64.set_main_thread_env(&g_rt.main_thread_env);
-    mobiro::cpu::GuestExecutor::run_tls_callbacks(g_rt.pe_image, g_rt.main_thread_env);
 
     g_rt.configured.store(true, std::memory_order_release);
     __android_log_print(ANDROID_LOG_INFO, kLogTag,
@@ -294,7 +296,30 @@ extern "C" void android_main(struct android_app* app) {
             if (source) source->process(app, source);
         }
         process_game_activity_input(app);
+
+        // Start x86_64 guest entry point on Prime core once BYOF PE64 + ANativeWindow are both ready
+        if (g_rt.configured.load(std::memory_order_acquire) &&
+            !g_rt.guest_started.load(std::memory_order_relaxed) &&
+            mobiro::gfx::DxvkInterop::global().surface().native_window != nullptr) {
+            if (!g_rt.guest_started.exchange(true, std::memory_order_acq_rel)) {
+                g_rt.guest_thread = std::thread([]() {
+                    g_rt.balancer.bind_current_thread(mobiro::sched::ThreadRole::MainSimPhysics);
+                    __android_log_print(ANDROID_LOG_INFO, kLogTag,
+                                        "Launching guest entry point at 0x%llx",
+                                        static_cast<unsigned long long>(g_rt.pe_image.entry_point));
+                    auto res = mobiro::cpu::GuestExecutor::run_entry(
+                        g_rt.pe_image, g_rt.main_thread_env, g_rt.box64);
+                    __android_log_print(ANDROID_LOG_INFO, kLogTag,
+                                        "Guest exited ok=%d rax=0x%llx err=%s",
+                                        res.ok ? 1 : 0,
+                                        static_cast<unsigned long long>(res.exit_rax),
+                                        res.error.c_str());
+                });
+            }
+        }
     }
+    g_rt.box64.window().post_quit(0);
+    if (g_rt.guest_thread.joinable()) g_rt.guest_thread.join();
     g_rt.cache_warmer.wait();
     g_rt.box64.shutdown();
     mobiro::audio::AAudioXAudioBridge::global().stop();

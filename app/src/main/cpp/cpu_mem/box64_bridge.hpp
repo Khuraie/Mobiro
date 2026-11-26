@@ -118,16 +118,34 @@ inline uintptr_t emu_teb_va(const x64emu_t* e) {
 
 using NativeThunkFn = void (*)(x64emu_t* emu);
 
-// Stub emitted into an RW trampoline table. Box64 Dynarec matches 0xCC 'M' 'B'
-// and emits an inline AArch64 BLR directly to thunk_ptr (MS x64 -> AAPCS64).
+// Box64 wrapper_t-compatible trampoline invoked directly by Box64's ARM64 Dynarec
+// and x64Int3 interpreter for every NativeBridgeStub (IAT thunks + D3D11 COM slots).
+extern "C" inline void mobiro_native_thunk_wrapper(x64emu_t* emu, uintptr_t fn_ptr) {
+    if (fn_ptr) {
+        reinterpret_cast<NativeThunkFn>(fn_ptr)(emu);
+    }
+}
+
+// Binary-compatible with upstream Box64's 32-byte `onebridge_t` (`src/tools/bridge_private.h`).
+// Box64 ARM64 Dynarec (`dynarec_arm64_00.c`) and `x64Int3` natively match `0xCC 'S' 'C'` and
+// dispatch `wrapper_ptr(emu, thunk_ptr)` followed by `0xC3` RET with zero Box64 patches.
 #pragma pack(push, 1)
-struct NativeBridgeStub {
-    uint8_t trap_cc = 0xCC;
-    uint8_t magic[2] = {'M', 'B'};
-    uint64_t thunk_ptr = 0;
-    uint8_t ret_op = 0xC3;
+struct alignas(32) NativeBridgeStub {
+    uint8_t  trap_cc = 0xCC;        // +0x00: INT3
+    uint8_t  magic[2] = {'S', 'C'}; // +0x01: Box64 IsBridgeSignature('S', 'C')
+    uint64_t wrapper_ptr = 0;       // +0x03: Box64 wrapper_t (&mobiro_native_thunk_wrapper)
+    uint64_t thunk_ptr = 0;         // +0x0B: NativeThunkFn
+    uint8_t  ret_op = 0xC3;         // +0x13: RET
+    uint16_t ret_n = 0;             // +0x14: N for C2 ret
+    uint8_t  is_func = 0;           // +0x16
+    uint64_t name_or_func = 0;      // +0x17: optional debug name
+    uint8_t  pad = 0;               // +0x1F
 };
 #pragma pack(pop)
+static_assert(sizeof(NativeBridgeStub) == 32);
+static_assert(offsetof(NativeBridgeStub, wrapper_ptr) == 3);
+static_assert(offsetof(NativeBridgeStub, thunk_ptr) == 11);
+static_assert(offsetof(NativeBridgeStub, ret_op) == 19);
 
 class Box64Bridge {
 public:
@@ -156,6 +174,7 @@ public:
     win32::FileHandleTable& files() { return files_; }
     win32::SrwLockTable& srw_locks() { return srw_locks_; }
     win32::CriticalSectionTable& crit_sections() { return crit_sections_; }
+    win32::ConditionVariableTable& cond_vars() { return cond_vars_; }
     win32::GuestHeap& heap() { return heap_; }
     win32::EventTable& events() { return events_; }
     win32::SehUnwindRegistry& seh() { return seh_; }
@@ -185,6 +204,7 @@ private:
     win32::FileHandleTable files_;
     win32::SrwLockTable srw_locks_;
     win32::CriticalSectionTable crit_sections_;
+    win32::ConditionVariableTable cond_vars_;
     win32::GuestHeap heap_;
     win32::EventTable events_;
     win32::SehUnwindRegistry seh_;

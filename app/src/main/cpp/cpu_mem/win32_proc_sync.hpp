@@ -143,6 +143,9 @@ public:
         std::condition_variable cv;
         bool manual_reset = false;
         bool signaled = false;
+        bool is_semaphore = false;
+        int32_t sem_count = 0;
+        int32_t sem_max = 0;
     };
 
     uint64_t create_event(bool manual_reset, bool initial_state) {
@@ -153,6 +156,33 @@ public:
         const uint64_t h = kHandleTag | (next_id_++);
         events_[h] = std::move(obj);
         return h;
+    }
+
+    uint64_t create_semaphore(int32_t initial_count, int32_t max_count) {
+        if (max_count <= 0 || initial_count < 0 || initial_count > max_count) return 0;
+        auto obj = std::make_shared<EventObj>();
+        obj->is_semaphore = true;
+        obj->sem_count = initial_count;
+        obj->sem_max = max_count;
+        obj->signaled = (initial_count > 0);
+        std::lock_guard<std::mutex> lock(mu_);
+        const uint64_t h = kHandleTag | (next_id_++);
+        events_[h] = std::move(obj);
+        return h;
+    }
+
+    bool release_semaphore(uint64_t h, int32_t release_count, int32_t* prev_count) {
+        auto obj = find(h);
+        if (!obj || !obj->is_semaphore || release_count <= 0) return false;
+        {
+            std::lock_guard<std::mutex> lk(obj->mu);
+            if (obj->sem_count + release_count > obj->sem_max) return false;
+            if (prev_count) *prev_count = obj->sem_count;
+            obj->sem_count += release_count;
+            obj->signaled = (obj->sem_count > 0);
+        }
+        obj->cv.notify_all();
+        return true;
     }
 
     bool is_event_handle(uint64_t h) const { return (h & 0xFFFF0000ULL) == kHandleTag; }
@@ -181,7 +211,7 @@ public:
         auto obj = find(h);
         if (!obj) return kWaitFailed;
         std::unique_lock<std::mutex> lk(obj->mu);
-        auto pred = [&] { return obj->signaled; };
+        auto pred = [&] { return obj->is_semaphore ? (obj->sem_count > 0) : obj->signaled; };
         bool ready = false;
         if (timeout_ms == kInfinite) {
             obj->cv.wait(lk, pred);
@@ -190,7 +220,12 @@ public:
             ready = obj->cv.wait_for(lk, std::chrono::milliseconds(timeout_ms), pred);
         }
         if (!ready) return kWaitTimeout;
-        if (!obj->manual_reset) obj->signaled = false;
+        if (obj->is_semaphore) {
+            --obj->sem_count;
+            obj->signaled = (obj->sem_count > 0);
+        } else if (!obj->manual_reset) {
+            obj->signaled = false;
+        }
         return kWaitObject0;
     }
 

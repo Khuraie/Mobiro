@@ -213,7 +213,7 @@ void test_pe_loader_teb_and_win32_thunks() {
     std::memcpy(&iat_d3d11, reinterpret_cast<const void*>(loaded.mapped_base + 0x1140), 8);
     assert(iat_d3d11 != 0);
     auto* stub = reinterpret_cast<const mobiro::cpu::NativeBridgeStub*>(iat_d3d11);
-    assert(stub->trap_cc == 0xCC && stub->magic[0] == 'M' && stub->magic[1] == 'B');
+    assert(stub->trap_cc == 0xCC && stub->magic[0] == 'S' && stub->magic[1] == 'C' && stub->wrapper_ptr != 0);
 
     // 2. Initialize Win64 TEB/PEB and test TLS + GetModuleHandleW + QPC thunks
     bridge.set_main_module_base(loaded.mapped_base);
@@ -1046,7 +1046,7 @@ void test_module_loader_and_headless_win32_ui() {
     emu.rdx = reinterpret_cast<uint64_t>("GetTickCount64");
     assert(bridge.invoke_thunk("kernel32.dll", "GetProcAddress", &emu));
     auto* stub = reinterpret_cast<const mobiro::cpu::NativeBridgeStub*>(emu.rax);
-    assert(stub != nullptr && stub->trap_cc == 0xCC && stub->magic[0] == 'M' && stub->magic[1] == 'B');
+    assert(stub != nullptr && stub->trap_cc == 0xCC && stub->magic[0] == 'S' && stub->magic[1] == 'C' && stub->wrapper_ptr != 0);
 
     // 3. Headless user32 window + message queue
     bridge.window().set_dimensions(2400, 1080);
@@ -1130,7 +1130,7 @@ void test_d3d11_com_bridge_ext_win32_and_hud_draw() {
     // Invoke Present (slot 8) through NativeBridgeStub in proxy->lpVtbl[8]
     const auto* present_stub = reinterpret_cast<const mobiro::cpu::NativeBridgeStub*>(
         proxy->lpVtbl[mobiro::gfx::d3d11_abi::DXGISwapChainSlots::kPresent]);
-    assert(present_stub->trap_cc == 0xCC && present_stub->magic[0] == 'M' && present_stub->magic[1] == 'B');
+    assert(present_stub->trap_cc == 0xCC && present_stub->magic[0] == 'S' && present_stub->magic[1] == 'C' && present_stub->wrapper_ptr != 0);
     x64emu_t emu{};
     emu.rcx = reinterpret_cast<uint64_t>(proxy);
     emu.rdx = 1; // SyncInterval = 1
@@ -1339,6 +1339,105 @@ void test_m10_xmm_com_auto_wrap_and_dllmain_tls() {
     bridge.shutdown();
 }
 
+void test_m11_box64_onebridge_condvar_sem_and_crt() {
+    static_assert(sizeof(mobiro::cpu::NativeBridgeStub) == 32);
+
+    const fs::path tmp = fs::temp_directory_path() / "mobiro_test_m11";
+    const fs::path save_ov = fs::temp_directory_path() / "mobiro_test_m11_saves";
+    fs::remove_all(tmp);
+    fs::remove_all(save_ov);
+    fs::create_directories(tmp);
+    fs::create_directories(save_ov);
+
+    mobiro::validator::VfsMapper vfs;
+    assert(vfs.index_root(tmp.string()));
+    vfs.set_write_overlay(save_ov.string());
+    mobiro::mem::GuestArena arena;
+    assert(arena.reserve(0x0000000100000000ULL, 128ULL * 1024 * 1024));
+    mobiro::cpu::Box64Bridge bridge;
+    assert(bridge.initialize(&arena, &vfs));
+
+    // 1. Verify Box64-compatible wrapper_t dispatch on a resolved IAT stub
+    const uintptr_t stub_va = bridge.resolve_import("kernel32.dll", "GetACP");
+    assert(stub_va != 0);
+    const auto* stub = reinterpret_cast<const mobiro::cpu::NativeBridgeStub*>(stub_va);
+    assert(stub->trap_cc == 0xCC && stub->magic[0] == 'S' && stub->magic[1] == 'C');
+    x64emu_t emu{};
+    reinterpret_cast<void(*)(x64emu_t*, uintptr_t)>(stub->wrapper_ptr)(&emu, static_cast<uintptr_t>(stub->thunk_ptr));
+    assert(emu.rax == 65001ULL);
+
+    // 2. Cross-thread ntdll SRWLock + ConditionVariable wake
+    uint64_t guest_srw = 0;
+    uint64_t guest_cv = 0;
+    std::atomic<bool> ready{false};
+    std::thread waker([&]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(15));
+        x64emu_t we{};
+        we.rcx = reinterpret_cast<uint64_t>(&guest_srw);
+        assert(bridge.invoke_thunk("ntdll.dll", "RtlAcquireSRWLockExclusive", &we));
+        ready.store(true, std::memory_order_release);
+        we.rcx = reinterpret_cast<uint64_t>(&guest_cv);
+        assert(bridge.invoke_thunk("ntdll.dll", "RtlWakeConditionVariable", &we));
+        we.rcx = reinterpret_cast<uint64_t>(&guest_srw);
+        assert(bridge.invoke_thunk("ntdll.dll", "RtlReleaseSRWLockExclusive", &we));
+    });
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>(&guest_srw);
+    assert(bridge.invoke_thunk("ntdll.dll", "RtlAcquireSRWLockExclusive", &emu));
+    while (!ready.load(std::memory_order_acquire)) {
+        emu = {};
+        emu.rcx = reinterpret_cast<uint64_t>(&guest_cv);
+        emu.rdx = reinterpret_cast<uint64_t>(&guest_srw);
+        emu.r8  = 2000; // 2s timeout
+        emu.r9  = 0;    // exclusive
+        assert(bridge.invoke_thunk("ntdll.dll", "RtlSleepConditionVariableSRW", &emu) && emu.rax == 1);
+    }
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>(&guest_srw);
+    assert(bridge.invoke_thunk("ntdll.dll", "RtlReleaseSRWLockExclusive", &emu));
+    waker.join();
+
+    // 3. Semaphore + WaitForMultipleObjects (wait-any)
+    emu = {}; emu.rdx = 0; emu.r8 = 4; // initial=0, max=4
+    assert(bridge.invoke_thunk("kernel32.dll", "CreateSemaphoreW", &emu) && emu.rax != 0);
+    const uint64_t hsem = emu.rax;
+    emu = {}; emu.rdx = 1; emu.r8 = 0; // manual-reset unsignaled event
+    assert(bridge.invoke_thunk("kernel32.dll", "CreateEventW", &emu) && emu.rax != 0);
+    const uint64_t hevt = emu.rax;
+
+    int32_t prev_cnt = -1;
+    emu = {}; emu.rcx = hsem; emu.rdx = 1; emu.r8 = reinterpret_cast<uint64_t>(&prev_cnt);
+    assert(bridge.invoke_thunk("kernel32.dll", "ReleaseSemaphore", &emu) && emu.rax == 1 && prev_cnt == 0);
+
+    uint64_t handles[2] = {hevt, hsem};
+    emu = {}; emu.rcx = 2; emu.rdx = reinterpret_cast<uint64_t>(handles); emu.r8 = 0; emu.r9 = 1000;
+    assert(bridge.invoke_thunk("kernel32.dll", "WaitForMultipleObjects", &emu) && emu.rax == 1); // index 1 = hsem
+
+    // 4. CRT metadata + VFS-overlay MoveFileExW & DeleteFileW
+    emu = {};
+    assert(bridge.invoke_thunk("kernel32.dll", "GetCurrentProcess", &emu) && emu.rax == ~0ULL);
+    uint16_t dir_buf[32]{};
+    emu = {}; emu.rcx = 32; emu.rdx = reinterpret_cast<uint64_t>(dir_buf);
+    assert(bridge.invoke_thunk("kernel32.dll", "GetCurrentDirectoryW", &emu) && emu.rax == 9);
+    assert(mobiro::win32::utf16le_to_utf8(dir_buf) == "C:\\Sekiro");
+
+    {
+        std::ofstream f(save_ov / "tmp.sl2", std::ios::binary);
+        f << "SAVE";
+    }
+    const uint16_t src_w[] = {'t','m','p','.','s','l','2', 0};
+    const uint16_t dst_w[] = {'S','0','0','0','0','.','s','l','2', 0};
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>(src_w); emu.rdx = reinterpret_cast<uint64_t>(dst_w);
+    assert(bridge.invoke_thunk("kernel32.dll", "MoveFileExW", &emu) && emu.rax == 1);
+    assert(fs::exists(save_ov / "S0000.sl2") && !fs::exists(save_ov / "tmp.sl2"));
+
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>(dst_w);
+    assert(bridge.invoke_thunk("kernel32.dll", "DeleteFileW", &emu) && emu.rax == 1);
+    assert(!fs::exists(save_ov / "S0000.sl2"));
+
+    bridge.shutdown();
+    fs::remove_all(tmp);
+    fs::remove_all(save_ov);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1364,6 +1463,7 @@ int main(int argc, char** argv) {
     test_module_loader_and_headless_win32_ui();
     test_d3d11_com_bridge_ext_win32_and_hud_draw();
     test_m10_xmm_com_auto_wrap_and_dllmain_tls();
+    test_m11_box64_onebridge_condvar_sem_and_crt();
     std::cout << "All Mobiro core unit tests passed.\n";
     return 0;
 }
