@@ -180,6 +180,11 @@ int mobiro_touch_overlay_record_draw(void* vk_cmd_buffer) {
     return g_rt.touch_overlay.record_draw_commands(vk_cmd_buffer) ? 1 : 0;
 }
 
+extern "C" __attribute__((visibility("default")))
+size_t mobiro_touch_overlay_copy_vertices(void* dst_vbo, size_t max_bytes) {
+    return g_rt.touch_overlay.copy_vertices(dst_vbo, max_bytes);
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_mobiro_runtime_MainActivity_nativeConfigureAndValidate(
     JNIEnv* env, jobject /*thiz*/, jstring jGameDir, jstring jSaveDir, jstring jCacheDir, jstring jNativeLibDir) {

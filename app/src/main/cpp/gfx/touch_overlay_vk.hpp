@@ -221,6 +221,17 @@ public:
         bindings_ = b;
     }
 
+    // Thread-safe copy of packed NDC vertices into a caller-mapped VBO; returns vertex count (0 if hidden/empty).
+    size_t copy_vertices(void* dst_vbo, size_t max_bytes) const {
+        if (!dst_vbo || !enabled()) return 0;
+        std::lock_guard<std::mutex> lk(mu_);
+        if (vertices_.empty()) return 0;
+        const size_t bytes = vertices_.size() * sizeof(HudVertex);
+        if (bytes > max_bytes) return 0;
+        std::memcpy(dst_vbo, vertices_.data(), bytes);
+        return vertices_.size();
+    }
+
     // Uploads packed HUD vertices into the mapped host-coherent VBO and records a single vkCmdDraw.
     bool record_draw_commands(void* vk_cmd_buffer) const {
         if (!vk_cmd_buffer || !enabled()) return false;

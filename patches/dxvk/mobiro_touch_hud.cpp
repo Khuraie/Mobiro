@@ -28,9 +28,8 @@ namespace dxvk {
       MobiroVertexInputAttrSpec attrs[2];
     };
 
-    using PfnGetSpec = const MobiroHudPipelineSpec* (*)();
-    using PfnAttach  = int (*)(void*, void*, uint64_t, uint64_t, void*, size_t);
-    using PfnRecord  = int (*)(void*);
+    using PfnGetSpec      = const MobiroHudPipelineSpec* (*)();
+    using PfnCopyVertices = size_t (*)(void* dst_vbo, size_t max_bytes);
 
 #if defined(DXVK_WSI_ANDROID)
     uint32_t findHostCoherentMemType(
@@ -95,9 +94,7 @@ namespace dxvk {
 
     static auto pfnGetSpec = reinterpret_cast<PfnGetSpec>(
       dlsym(RTLD_DEFAULT, "mobiro_touch_overlay_pipeline_spec"));
-    static auto pfnAttach = reinterpret_cast<PfnAttach>(
-      dlsym(RTLD_DEFAULT, "mobiro_touch_overlay_attach_device"));
-    if (!pfnGetSpec || !pfnAttach) {
+    if (!pfnGetSpec) {
       m_unavailable = true;
       return false;
     }
@@ -110,7 +107,6 @@ namespace dxvk {
 
     m_device = device;
     auto vkd = device->vkd();
-    auto vki = device->vki();
 
     // 1. Host-coherent vertex buffer for single-draw touch HUD quads
     VkBufferCreateInfo bufInfo = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
@@ -206,8 +202,8 @@ namespace dxvk {
     iaState.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 
     VkPipelineViewportStateCreateInfo vpState = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
-    vpState.viewportCount = 1;
-    vpState.scissorCount  = 1;
+    vpState.viewportCount = 0;
+    vpState.scissorCount  = 0;
 
     VkPipelineRasterizationStateCreateInfo rsState = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
     rsState.polygonMode = VK_POLYGON_MODE_FILL;
@@ -233,7 +229,10 @@ namespace dxvk {
     cbState.attachmentCount = 1;
     cbState.pAttachments    = &cbAtt;
 
-    static const VkDynamicState dynStates[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    static const VkDynamicState dynStates[2] = {
+      VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT,
+      VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT
+    };
     VkPipelineDynamicStateCreateInfo dynState = { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
     dynState.dynamicStateCount = 2;
     dynState.pDynamicStates    = dynStates;
@@ -267,18 +266,6 @@ namespace dxvk {
     }
 
     m_colorFormat = colorFormat;
-    const int attached = pfnAttach(
-      vkd->device(),
-      reinterpret_cast<void*>(vki->vkGetDeviceProcAddr),
-      static_cast<uint64_t>(reinterpret_cast<uintptr_t>(m_pipeline)),
-      static_cast<uint64_t>(reinterpret_cast<uintptr_t>(m_vbo)),
-      m_mappedVbo,
-      static_cast<size_t>(kMobiroHudVboBytes));
-    if (!attached) {
-      destroyResources();
-      m_unavailable = true;
-      return false;
-    }
     return true;
 #endif
   }
@@ -297,19 +284,26 @@ namespace dxvk {
     if (!ensureResources(device, dstView->info().format))
       return;
 
-    static auto pfnRecord = reinterpret_cast<PfnRecord>(
-      dlsym(RTLD_DEFAULT, "mobiro_touch_overlay_record_draw"));
-    if (!pfnRecord)
+    static auto pfnCopy = reinterpret_cast<PfnCopyVertices>(
+      dlsym(RTLD_DEFAULT, "mobiro_touch_overlay_copy_vertices"));
+    if (!pfnCopy)
+      return;
+
+    const size_t vtxCount = pfnCopy(m_mappedVbo, static_cast<size_t>(kMobiroHudVboBytes));
+    if (vtxCount == 0)
       return;
 
     const VkExtent3D ext = dstView->mipLevelExtent(0);
     VkViewport vp = { 0.0f, 0.0f, float(ext.width), float(ext.height), 0.0f, 1.0f };
     VkRect2D   sc = { { 0, 0 }, { ext.width, ext.height } };
-    VkCommandBuffer cmd = ctx->getCmdBuffer(DxvkCmdBuffer::ExecBuffer);
-    auto vkd = device->vkd();
-    vkd->vkCmdSetViewport(cmd, 0, 1, &vp);
-    vkd->vkCmdSetScissor(cmd, 0, 1, &sc);
-    (void)pfnRecord(cmd);
+    VkDeviceSize offset = 0;
+    VkDeviceSize vboSz  = kMobiroHudVboBytes;
+
+    ctx->cmdSetViewport(1, &vp);
+    ctx->cmdSetScissor(1, &sc);
+    ctx->cmdBindPipeline(DxvkCmdBuffer::ExecBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);
+    ctx->cmdBindVertexBuffers(0, 1, &m_vbo, &offset, &vboSz, nullptr);
+    ctx->cmdDraw(static_cast<uint32_t>(vtxCount), 1, 0, 0);
 #endif
   }
 
