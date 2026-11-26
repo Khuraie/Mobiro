@@ -248,6 +248,13 @@ private:
     std::deque<std::string> interned_unresolved_;
     std::unordered_map<std::string, uintptr_t> unresolved_stub_cache_;
     std::vector<std::string> called_unresolved_;
+    struct TracedImport {
+        NativeThunkFn fn = nullptr;
+        const char* name = nullptr;
+    };
+    std::deque<std::string> interned_resolved_;
+    std::deque<TracedImport> traced_imports_;
+    void* api_trace_fp_ = nullptr; // FILE* when MOBIRO_API_TRACE_FILE is set
     static inline Box64Bridge* g_instance_ = nullptr;
 };
 

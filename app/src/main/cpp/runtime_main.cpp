@@ -284,8 +284,12 @@ Java_com_mobiro_runtime_MainActivity_nativeConfigureAndValidate(
     setenv("BOX64_DYNAREC_WAIT", "1", 0);
     setenv("BOX64_NOBANNER", "1", 0);
     const std::string box64_log = (std::filesystem::path(game_dir).parent_path() / "mobiro_box64.log").string();
+    const std::string api_log = (std::filesystem::path(game_dir).parent_path() / "mobiro_api.log").string();
     setenv("BOX64_TRACE_FILE", box64_log.c_str(), 1);
     setenv("BOX64_LOG", "1", 0);
+    setenv("BOX64_SHOWBT", "1", 0);
+    setenv("BOX64_SHOWSEGV", "1", 0);
+    setenv("MOBIRO_API_TRACE_FILE", api_log.c_str(), 1);
 
     // 4. Load Mesa Turnip ICD (with graceful fallback to system Vulkan) + native AArch64 DXVK
     g_rt.vk_driver = mobiro::gfx::load_vulkan_driver(lib_dir);

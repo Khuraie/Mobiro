@@ -1504,6 +1504,13 @@ bool Box64Bridge::initialize(mem::GuestArena* arena, validator::VfsMapper* vfs) 
 #endif
     stub_count_ = 0;
     sync_box64_exec_region(stub_pool_, kMaxStubs * sizeof(NativeBridgeStub));
+    if (const char* trace_path = std::getenv("MOBIRO_API_TRACE_FILE"); trace_path && trace_path[0]) {
+        FILE* fp = std::fopen(trace_path, "w");
+        if (fp) {
+            std::setvbuf(fp, nullptr, _IONBF, 0);
+            api_trace_fp_ = fp;
+        }
+    }
     heap_.initialize(arena_, 32 * 1024 * 1024);
     threads_.set_static_tls(&static_tls_);
     threads_.set_env_dispatch_callback(
@@ -1526,12 +1533,18 @@ void Box64Bridge::shutdown() {
     window_.clear();
     static_tls_.clear();
     heap_.reset();
+    if (api_trace_fp_) {
+        std::fclose(static_cast<FILE*>(api_trace_fp_));
+        api_trace_fp_ = nullptr;
+    }
     {
         std::lock_guard<std::mutex> lk(unresolved_mu_);
         interned_unresolved_.clear();
         unresolved_stub_cache_.clear();
         called_unresolved_.clear();
     }
+    interned_resolved_.clear();
+    traced_imports_.clear();
     if (stub_pool_) {
 #if defined(__linux__) || defined(__ANDROID__)
         munmap(stub_pool_, kMaxStubs * sizeof(NativeBridgeStub));
@@ -1548,14 +1561,93 @@ void Box64Bridge::register_thunk(const std::string& dll_lower, const std::string
     thunks_[validator::VfsMapper::normalize(dll_lower) + "!" + symbol] = fn;
 }
 
+extern "C" void mobiro_traced_import_wrapper(x64emu_t* emu, uintptr_t slot_ptr) {
+    struct Slot { NativeThunkFn fn; const char* name; };
+    const auto* slot = reinterpret_cast<const Slot*>(slot_ptr);
+    if (!slot || !slot->fn) return;
+    static std::atomic<uint64_t> g_seq{0};
+    const uint64_t seq = ++g_seq;
+    const uint64_t rcx = emu ? emu_reg_rcx(emu) : 0;
+    const uint64_t rdx = emu ? emu_reg_rdx(emu) : 0;
+    const uint64_t r8  = emu ? emu_reg_r8(emu)  : 0;
+    const uint64_t r9  = emu ? emu_reg_r9(emu)  : 0;
+    uint64_t ret_va = 0;
+    if (emu && emu_reg_rsp(emu)) {
+        std::memcpy(&ret_va, reinterpret_cast<const void*>(emu_reg_rsp(emu)), 8);
+    }
+    slot->fn(emu);
+    const uint64_t rax = emu ? emu_reg_rax(emu) : 0;
+    // Cap trace volume to first 2000 calls (plus any interesting API) so boot logs stay crisp
+    const char* nm = slot->name ? slot->name : "?";
+    const bool interesting =
+        std::strstr(nm, "GetProcAddress") || std::strstr(nm, "LoadLibrary") ||
+        std::strstr(nm, "GetModuleHandle") || std::strstr(nm, "CreateFile") ||
+        std::strstr(nm, "D3D11") || std::strstr(nm, "DXGI") ||
+        std::strstr(nm, "ExitProcess") || std::strstr(nm, "TerminateProcess") ||
+        std::strstr(nm, "RaiseException") || std::strstr(nm, "VirtualAlloc") ||
+        std::strstr(nm, "VirtualProtect") || std::strstr(nm, "CreateThread") ||
+        std::strstr(nm, "CreateWindow") || std::strstr(nm, "steam");
+    if (seq <= 2000 || interesting) {
+        if (const char* tp = std::getenv("MOBIRO_API_TRACE_FILE"); tp && tp[0]) {
+            if (FILE* fp = std::fopen(tp, "a")) {
+                auto ascii_preview = [](uint64_t va) -> std::string {
+                    const auto* p = reinterpret_cast<const char*>(va);
+                    std::string out;
+                    for (int i = 0; i < 120 && p[i]; ++i) {
+                        const unsigned char c = static_cast<unsigned char>(p[i]);
+                        out.push_back((c >= 32 && c < 127) ? static_cast<char>(c) : '?');
+                    }
+                    return out;
+                };
+                auto wide_preview = [](uint64_t va) -> std::string {
+                    const auto* p = reinterpret_cast<const uint16_t*>(va);
+                    std::string out;
+                    for (int i = 0; i < 120 && p[i]; ++i) {
+                        out.push_back((p[i] >= 32 && p[i] < 127) ? static_cast<char>(p[i]) : '?');
+                    }
+                    return out;
+                };
+                std::string extra;
+                if (std::strstr(nm, "GetProcAddress") && rdx > 0xFFFF) {
+                    extra = std::string(" sym=\"") + ascii_preview(rdx) + "\"";
+                } else if ((std::strstr(nm, "LoadLibraryA") || std::strstr(nm, "GetModuleHandleA") ||
+                            std::strstr(nm, "CreateFileA")) && rcx > 0xFFFF) {
+                    extra = std::string(" s=\"") + ascii_preview(rcx) + "\"";
+                } else if ((std::strstr(nm, "LoadLibraryW") || std::strstr(nm, "LoadLibraryExW") ||
+                            std::strstr(nm, "GetModuleHandleW") || std::strstr(nm, "CreateFileW")) && rcx > 0xFFFF) {
+                    extra = std::string(" ws=\"") + wide_preview(rcx) + "\"";
+                }
+                std::fprintf(fp, "[#%llu] ret=0x%llx %s(rcx=0x%llx, rdx=0x%llx, r8=0x%llx, r9=0x%llx)%s -> 0x%llx\n",
+                             static_cast<unsigned long long>(seq),
+                             static_cast<unsigned long long>(ret_va), nm,
+                             static_cast<unsigned long long>(rcx),
+                             static_cast<unsigned long long>(rdx),
+                             static_cast<unsigned long long>(r8),
+                             static_cast<unsigned long long>(r9),
+                             extra.c_str(),
+                             static_cast<unsigned long long>(rax));
+                std::fclose(fp);
+            }
+        }
+    }
+}
+
 uintptr_t Box64Bridge::resolve_import(const std::string& dll_lower, const std::string& symbol) {
-    auto it = thunks_.find(validator::VfsMapper::normalize(dll_lower) + "!" + symbol);
+    const std::string key = validator::VfsMapper::normalize(dll_lower) + "!" + symbol;
+    auto it = thunks_.find(key);
     if (it == thunks_.end() || !stub_pool_ || stub_count_ >= kMaxStubs) return 0;
 
     NativeBridgeStub& stub = stub_pool_[stub_count_++];
     stub = NativeBridgeStub{};
-    stub.wrapper_ptr = reinterpret_cast<uint64_t>(&mobiro_native_thunk_wrapper);
-    stub.thunk_ptr = reinterpret_cast<uint64_t>(it->second);
+    if (api_trace_fp_) {
+        interned_resolved_.push_back(key);
+        traced_imports_.push_back({it->second, interned_resolved_.back().c_str()});
+        stub.wrapper_ptr = reinterpret_cast<uint64_t>(&mobiro_traced_import_wrapper);
+        stub.thunk_ptr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(&traced_imports_.back()));
+    } else {
+        stub.wrapper_ptr = reinterpret_cast<uint64_t>(&mobiro_native_thunk_wrapper);
+        stub.thunk_ptr = reinterpret_cast<uint64_t>(it->second);
+    }
     return reinterpret_cast<uintptr_t>(&stub);
 }
 
