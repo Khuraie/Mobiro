@@ -48,7 +48,8 @@ meson setup "$BUILD_DIR/out" "$MESA_SRC" "${SETUP_FLAGS[@]}" \
   --cross-file "$CROSS_FILE" \
   -Dbuildtype=release \
   -Dplatforms=android \
-  -Dplatform-sdk-version=31 \
+  -Dplatform-sdk-version=35 \
+  -Dandroid-strict=false \
   -Dandroid-stub=true \
   -Dandroid-libbacktrace=disabled \
   -Dgallium-drivers= \
