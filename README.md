@@ -60,6 +60,16 @@ Requires Android SDK 35, NDK `27.2.12479018`, CMake `3.22.1`, and JDK 17:
 gradle :app:assembleDebug
 ```
 
+### 4. Built-In Clean-Room 60 FPS Self-Test & Trace Toggle (Android)
+The CI-assembled bundled APK embeds a clean-room Win64 D3D11 + XAudio2 + XInput 60 FPS payload (`tools/mobiro_selftest.c`, zero game assets):
+```bash
+# Run 120-frame 60 FPS D3D11/DXVK/TouchHUD self-test without staging 12.5 GB of BYOF files
+adb shell am start -n com.mobiro.runtime/.MainActivity --ez selftest true
+
+# Optional: enable verbose Box64 + Win32 API trace logs (off by default for zero-overhead 60 FPS)
+adb shell am start -n com.mobiro.runtime/.MainActivity --ez selftest true --ez trace true
+```
+
 ---
 
 ## Roadmap & Progress
@@ -88,7 +98,10 @@ See [PROGRESS.md](PROGRESS.md) for the live engineering log of every verified in
 - [x] **M18 — 100% Retail PE64 Import Coverage, `Data1..Data5` Validator Fix, FMODEx/Bink2 `waveOut*` → `AAudio` Bridge & DirectInput8 `onebridge_t` Proxy:** Fixed retail `Data1..Data5` encrypted/DCX BYOF validation, implemented real WinMM `waveOut*` → `AAudio` streaming for FMODEx/Bink2, wrapped `IDirectInput8` in Box64 `onebridge_t`, added `dxgi!CreateDXGIFactory` + `xinput1_3!#2/#3` + full `kernel32`/`user32`/`gdi32`/`ole32`/`advapi32`/`ws2_32` retail import coverage (`534/534` retail `sekiro.exe` imports resolved), and added `--verify-byof` dry-run loader validation.
 - [x] **M19 — Win64 Implicit Static TLS (`GS:[0x58]`) Isolation & One-Command ADB Staging:** Implemented `StaticTlsRegistry` + isolated per-thread `.tls` template copies behind `GS:[0x58]` (preventing NULL-deref & `TlsAlloc` collisions across `sekiro.exe`, `fmod_event64.dll`, and `fmodex64.dll`), patched PE `*AddressOfIndex`, and added `scripts/stage_byof_adb.ps1` for one-command PC → Snapdragon deployment.
 - [x] **M20 — Full-Stack Bundled APK Verified Green (`52.9 MB`) & Android 15 MuMu Smoke Test:** Verified from-source `arm64-v8a` compilation & linking of Box64 (`LoadEnvVariables()`), Mesa Turnip, and Native DXVK (`AndroidWsiDriver` + `MobiroTouchHud`) in Run `45885793713`, fixed Android 15 `extractNativeLibs="false"` bare-soname `dlopen` + missing SAF picker crash, and verified live install/launch on Android 15 MuMu Player.
-- [ ] **M21 — Live Snapdragon 8 Gen 2 (Adreno 740) Gameplay Bring-Up & 60 FPS Tuning:** Deploy the `52.9 MB` bundled APK + user-supplied BYOF files to a Snapdragon 8 Gen 2 device via `scripts/stage_byof_adb.ps1`, inspect live `adb logcat -s Mobiro`, and tune frame pacing for locked 60 FPS.
+- [x] **M21 — Live Snapdragon 8 Gen 2 (Honor Magic5 Pro) ARM64 Dynarec Bring-Up & 1,507-Call Real Win32 Trace:** Fixed embedded Box64 ARM64 Dynarec initialization & dynamic `memprot` sync (`GuestArena` + all `NativeBridgeStub` slabs), added GuestHeap-backed `msvcrt`/`ucrtbase`, `FileMappingStore`, `ntdll` `Nt*`/`Zw*`/`Rtl*`, and `VfsMapper::strip_prefix` fixes; verified all 6 retail BYOF DLL `DllMain`s + 1,507 real `sekiro.exe` Win32 calls live on Adreno 740.
+- [x] **M22 — Zero-Overhead 60 FPS Trace Gating, Turnip Android 16 `clns-*` Stub Fix & Clean-Room Self-Test:** Gated Box64/Win32 tracing behind opt-in `mobiro_trace.enable`, eliminated private `libhardware.so`/`libsync.so`/`libbacktrace.so` `DT_NEEDED` entries from Mesa Turnip (`scripts/patch_turnip_android_stubs.py` + `llvm-readelf -d` CI gate), and added `tools/mobiro_selftest.c` + `--verify-pe` CI validation.
+- [x] **M23 — D3D11 Hot-Loop Fast Path, Turnip VNDK Bridge & Built-In APK Self-Test Mode:** Added 1–4 arg fast path & `SO`/`HS`/`DS` array unwrapping in `D3D11ComBridge`, bridged `AHardwareBuffer_getNativeHandle` via static `dlsym` (`--dyn-syms` CI gate), and bundled `mobiro_selftest.exe` inside the APK (`--ez selftest true`, `--ez trace true`).
+- [x] **M24 — `SetResourceMinLOD` (`XMM2`), Live `avgMs`/`maxMs` Frame Telemetry & Clean Guest-Exit UX:** Added `XMM2` float forwarding for `ID3D11DeviceContext::SetResourceMinLOD` (slot 55), exact `avgMs`/`maxMs` pacing telemetry in `DxvkInterop` + `nativeGetDiagnosticsSummary()`, zero-warning `tools/mobiro_selftest.c`, and clean guest-exit Toast/Logcat reporting in `MainActivity.kt`.
 
 ---
 

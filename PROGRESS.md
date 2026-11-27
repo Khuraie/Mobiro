@@ -6,6 +6,16 @@
 
 ## Log Entries
 
+### Increment 26 — M24: `SetResourceMinLOD` (`XMM2`), Exact `avgMs`/`maxMs` Frame Telemetry & Clean Guest-Exit UX (2026-11-27)
+- **Status:** Implemented & verified (local MSVC 2022 tests + live retail `--verify-byof` + GitHub Actions CI)
+- **Changes:**
+  - Added Win64 `XMM2` scalar float forwarding + resource proxy unwrapping for `ID3D11DeviceContext::SetResourceMinLOD` (slot 55) in `app/src/main/cpp/gfx/d3d11_com_bridge.hpp`, protecting FromSoftware texture streaming LOD clamping.
+  - Added `total_frame_ns` + `avg_frame_ms()` / `max_frame_ms()` to `FramePacingStats` (`app/src/main/cpp/gfx/dxvk_interop.hpp`) and surfaced `avgMs=... maxMs=...` in `nativeGetDiagnosticsSummary()` (`runtime_main.cpp`).
+  - Added a lightweight 1 Hz guest-exit watcher in `MainActivity.kt` (cancelled in `onDestroy()`) surfacing clean guest exit diagnostics (`exit=0x35` Steam client requirement or clean `exit=0x0` self-test `frames`/`drops`/`avgMs`/`maxMs` summary).
+  - Fixed `-Wcomment` warning in `tools/mobiro_selftest.c`, added `test_m24_set_resource_min_lod_xmm2_and_frame_ms_stats` (`24/24` suites) in `tests/test_core.cpp`, and updated `README.md` with M21–M24 milestones and `--ez selftest true` / `--ez trace true` instructions.
+
+---
+
 ### Increment 25 — M23: D3D11 Draw-Loop Fast Path, Turnip VNDK `AHardwareBuffer_getNativeHandle` Bridge & Built-In APK 60 FPS Self-Test Mode (2026-11-27)
 - **Status:** Implemented & verified (local MSVC 2022 tests + GitHub Actions CI + full bundled ARM64 APK rebuild)
 - **Changes:**

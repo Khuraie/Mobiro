@@ -2661,6 +2661,59 @@ void test_m23_d3d11_hot_loop_and_hs_ds_so_unwrap() {
     }
 }
 
+void test_m24_set_resource_min_lod_xmm2_and_frame_ms_stats() {
+    struct FakeObj { void** vtbl; };
+    static FakeObj g_ctx{}, g_tex{};
+    static void* g_lod_res = nullptr;
+    static float g_lod_val = -1.0f;
+    g_lod_res = nullptr;
+    g_lod_val = -1.0f;
+
+    static auto release_fn = +[](void*) -> uint32_t { return 0u; };
+    static auto set_min_lod = +[](void*, void* res, float lod) {
+        g_lod_res = res;
+        g_lod_val = lod;
+    };
+
+    static void* tex_vtbl[14]{};
+    tex_vtbl[2] = reinterpret_cast<void*>(release_fn);
+    g_tex.vtbl = tex_vtbl;
+
+    static void* ctx_vtbl[115]{};
+    ctx_vtbl[2]  = reinterpret_cast<void*>(release_fn);
+    ctx_vtbl[55] = reinterpret_cast<void*>(set_min_lod);
+    g_ctx.vtbl = ctx_vtbl;
+
+    auto& com = mobiro::gfx::D3D11ComBridge::global();
+    void* ctx_p = com.wrap(&g_ctx, mobiro::gfx::d3d11_abi::ComIfaceId::D3D11DeviceContext);
+    void* tex_p = com.wrap(&g_tex, mobiro::gfx::d3d11_abi::ComIfaceId::D3D11ResourceChild);
+
+    // 1. Verify SetResourceMinLOD (slot 55) unwraps pResource and forwards scalar float MinLOD via XMM2
+    x64emu_t emu{};
+    emu.rcx = reinterpret_cast<uint64_t>(ctx_p);
+    emu.rdx = reinterpret_cast<uint64_t>(tex_p);
+    mobiro::cpu::emu_set_xmm_f32(&emu, 2, 2.5f);
+    mobiro::gfx::D3D11ComBridge::dispatch_slot<55>(&emu);
+    assert(g_lod_res == &g_tex && g_lod_val > 2.49f && g_lod_val < 2.51f);
+
+    for (void* p : {tex_p, ctx_p}) {
+        emu = {}; emu.rcx = reinterpret_cast<uint64_t>(p);
+        mobiro::gfx::D3D11ComBridge::dispatch_slot<2>(&emu);
+    }
+
+    // 2. Verify DxvkInterop FramePacingStats avg_frame_ms() & max_frame_ms()
+    auto& dxvk = mobiro::gfx::DxvkInterop::global();
+    dxvk.reset_pacer();
+    dxvk.set_target_fps(60);
+    (void)dxvk.pace_present();
+    (void)dxvk.pace_present();
+    (void)dxvk.pace_present();
+    const auto st = dxvk.pacing_stats();
+    assert(st.frames_presented == 3);
+    assert(st.total_frame_ns > 0);
+    assert(st.avg_frame_ms() > 0.0 && st.max_frame_ms() >= st.avg_frame_ms());
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -2753,6 +2806,7 @@ int main(int argc, char** argv) {
     test_m21_vfs_prefix_crt_file_mapping_and_ntdll();
     test_m22_end_to_end_d3d11_xaudio_xinput_60fps_selftest();
     test_m23_d3d11_hot_loop_and_hs_ds_so_unwrap();
+    test_m24_set_resource_min_lod_xmm2_and_frame_ms_stats();
     std::cout << "All Mobiro core unit tests passed.\n";
     return 0;
 }

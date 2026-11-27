@@ -402,6 +402,12 @@ Java_com_mobiro_runtime_MainActivity_nativeGetDiagnosticsSummary(JNIEnv* env, jo
         " frames=" + std::to_string(pace.frames_presented) +
         " drops=" + std::to_string(pace.frames_dropped) +
         " trace=" + (g_rt.trace_enabled.load(std::memory_order_relaxed) ? "on" : "off");
+    if (pace.frames_presented > 1) {
+        char ms_buf[64];
+        std::snprintf(ms_buf, sizeof(ms_buf), " avgMs=%.2f maxMs=%.2f",
+                      pace.avg_frame_ms(), pace.max_frame_ms());
+        summary += ms_buf;
+    }
     if (g_rt.guest_exited.load(std::memory_order_acquire)) {
         char hex[32];
         std::snprintf(hex, sizeof(hex), " exit=0x%llx",

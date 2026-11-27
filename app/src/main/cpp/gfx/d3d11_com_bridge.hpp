@@ -185,6 +185,19 @@ public:
             }
         }
 
+        // Handle ID3D11DeviceContext::SetResourceMinLOD (slot 55) scalar float MinLOD in XMM2
+        if constexpr (Slot == 55) {
+            if (proxy->iface == d3d11_abi::ComIfaceId::D3D11DeviceContext) {
+                using SetMinLodFn = void (*)(void*, void*, float);
+                auto fn = reinterpret_cast<SetMinLodFn>(native_vtbl[Slot]);
+                void* res = reinterpret_cast<void*>(self.unwrap_arg(rdx));
+                const float min_lod = cpu::emu_xmm_f32(emu, 2);
+                fn(proxy->native_obj, res, min_lod);
+                rax = 0ULL;
+                return;
+            }
+        }
+
         uint64_t a1 = self.unwrap_arg(rdx);
         uint64_t a2 = self.unwrap_arg(r8);
         uint64_t a3 = self.unwrap_arg(r9);

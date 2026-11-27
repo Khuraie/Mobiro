@@ -4,6 +4,8 @@ import android.content.ComponentCallbacks2
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.DocumentsContract
 import android.util.Log
 import android.view.View
@@ -16,6 +18,8 @@ import java.io.File
 class MainActivity : GameActivity() {
 
     private lateinit var thermalMonitor: ThermalMonitor
+    private val uiHandler = Handler(Looper.getMainLooper())
+    private var exitWatcher: Runnable? = null
 
     private val pickByofDirectory =
         registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri: Uri? ->
@@ -82,6 +86,8 @@ class MainActivity : GameActivity() {
     }
 
     override fun onDestroy() {
+        exitWatcher?.let { uiHandler.removeCallbacks(it) }
+        exitWatcher = null
         thermalMonitor.stop()
         super.onDestroy()
     }
@@ -119,7 +125,31 @@ class MainActivity : GameActivity() {
             val diag = nativeGetDiagnosticsSummary()
             Log.i(TAG, "Mobiro ready: $diag")
             Toast.makeText(this, "Mobiro: $diag", Toast.LENGTH_SHORT).show()
+            scheduleExitWatcher()
         }
+    }
+
+    private fun scheduleExitWatcher() {
+        exitWatcher?.let { uiHandler.removeCallbacks(it) }
+        val check = object : Runnable {
+            override fun run() {
+                val diag = nativeGetDiagnosticsSummary()
+                if (diag.contains(" exit=")) {
+                    val msg = if (diag.contains(" exit=0x35")) {
+                        "Guest exited (0x35): retail Steam binary requires Steam client. [$diag]"
+                    } else {
+                        "Mobiro finished: $diag"
+                    }
+                    Log.i(TAG, msg)
+                    Toast.makeText(this@MainActivity, msg, Toast.LENGTH_LONG).show()
+                    exitWatcher = null
+                } else {
+                    uiHandler.postDelayed(this, 1000L)
+                }
+            }
+        }
+        exitWatcher = check
+        uiHandler.postDelayed(check, 1000L)
     }
 
     private fun defaultByofDir(): File = File(getExternalFilesDir(null), "game")

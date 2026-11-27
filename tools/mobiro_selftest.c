@@ -1,7 +1,7 @@
 // Clean-room Win64 x86_64 Direct3D 11 + XAudio2 + XInput 60 FPS self-test payload for Mobiro.
 // Zero copyrighted assets, zero DRM, zero CRT dependencies (-nostdlib).
-// Build: x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -fno-builtin -nostdlib -e WinMainCRTStartup \
-//          tools/mobiro_selftest.c -o mobiro_selftest.exe -lkernel32 -luser32 -ld3d11 -ldxgi -lwinmm
+// Build: x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -fno-builtin -nostdlib -e WinMainCRTStartup
+//        tools/mobiro_selftest.c -o mobiro_selftest.exe -lkernel32 -luser32 -ld3d11 -ldxgi -lwinmm
 
 #include <stdint.h>
 

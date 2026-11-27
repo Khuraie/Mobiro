@@ -67,6 +67,17 @@ struct FramePacingStats {
     int64_t last_work_ns = 0;
     int64_t last_frame_ns = 0;
     int64_t max_frame_ns = 0;
+    int64_t total_frame_ns = 0;
+
+    double avg_frame_ms() const noexcept {
+        return (frames_presented > 1)
+                   ? (static_cast<double>(total_frame_ns) /
+                      (static_cast<double>(frames_presented - 1) * 1'000'000.0))
+                   : 0.0;
+    }
+    double max_frame_ms() const noexcept {
+        return static_cast<double>(max_frame_ns) / 1'000'000.0;
+    }
 };
 
 // Bridges Android ANativeWindow + Mesa Turnip ICD + native AArch64 DXVK libraries
@@ -154,6 +165,7 @@ public:
             ++stats_.frames_presented;
             stats_.last_work_ns = work_ns;
             stats_.last_frame_ns = frame_ns;
+            stats_.total_frame_ns += frame_ns;
             if (frame_ns > stats_.max_frame_ns) stats_.max_frame_ns = frame_ns;
             if (frame_ns > interval_ns + 1'500'000LL) ++stats_.frames_dropped;
 
