@@ -12,11 +12,12 @@ enum class ComIfaceId : uint32_t {
     DXGIAdapter1 = 1,
     DXGIFactory1 = 2,
     DXGISwapChain = 3,
-    D3D11Device = 4,
-    D3D11DeviceContext = 5,
-    DXGIOutput = 6,
-    D3D11ResourceChild = 7,
-    Count = 8
+    DXGIDevice = 4,
+    D3D11Device = 5,
+    D3D11DeviceContext = 6,
+    DXGIOutput = 7,
+    D3D11ResourceChild = 8,
+    Count = 9
 };
 
 struct ComMethodMeta {
@@ -43,6 +44,8 @@ inline constexpr uint32_t kAddRef = 1;
 inline constexpr ComMethodMeta kMeta_AddRef = {1, 1, false};
 inline constexpr uint32_t kRelease = 2;
 inline constexpr ComMethodMeta kMeta_Release = {2, 1, false};
+inline constexpr uint32_t kGetParent = 6;
+inline constexpr ComMethodMeta kMeta_GetParent = {6, 3, false};
 inline constexpr uint32_t kEnumOutputs = 7;
 inline constexpr ComMethodMeta kMeta_EnumOutputs = {7, 3, false};
 inline constexpr uint32_t kGetDesc = 8;
@@ -61,6 +64,8 @@ inline constexpr uint32_t kAddRef = 1;
 inline constexpr ComMethodMeta kMeta_AddRef = {1, 1, false};
 inline constexpr uint32_t kRelease = 2;
 inline constexpr ComMethodMeta kMeta_Release = {2, 1, false};
+inline constexpr uint32_t kGetParent = 6;
+inline constexpr ComMethodMeta kMeta_GetParent = {6, 3, false};
 inline constexpr uint32_t kEnumAdapters = 7;
 inline constexpr ComMethodMeta kMeta_EnumAdapters = {7, 3, false};
 inline constexpr uint32_t kMakeWindowAssociation = 8;
@@ -85,6 +90,8 @@ inline constexpr uint32_t kAddRef = 1;
 inline constexpr ComMethodMeta kMeta_AddRef = {1, 1, false};
 inline constexpr uint32_t kRelease = 2;
 inline constexpr ComMethodMeta kMeta_Release = {2, 1, false};
+inline constexpr uint32_t kGetParent = 6;
+inline constexpr ComMethodMeta kMeta_GetParent = {6, 3, false};
 inline constexpr uint32_t kPresent = 8;
 inline constexpr ComMethodMeta kMeta_Present = {8, 3, false};
 inline constexpr uint32_t kGetBuffer = 9;
@@ -99,7 +106,27 @@ inline constexpr uint32_t kResizeBuffers = 13;
 inline constexpr ComMethodMeta kMeta_ResizeBuffers = {13, 6, false};
 inline constexpr uint32_t kResizeTarget = 14;
 inline constexpr ComMethodMeta kMeta_ResizeTarget = {14, 2, false};
+inline constexpr uint32_t kGetContainingOutput = 15;
+inline constexpr ComMethodMeta kMeta_GetContainingOutput = {15, 2, false};
 } // namespace DXGISwapChainSlots
+
+namespace DXGIDeviceSlots {
+inline constexpr size_t kSlotCount = 14;
+inline constexpr uint32_t kQueryInterface = 0;
+inline constexpr ComMethodMeta kMeta_QueryInterface = {0, 3, false};
+inline constexpr uint32_t kAddRef = 1;
+inline constexpr ComMethodMeta kMeta_AddRef = {1, 1, false};
+inline constexpr uint32_t kRelease = 2;
+inline constexpr ComMethodMeta kMeta_Release = {2, 1, false};
+inline constexpr uint32_t kGetParent = 6;
+inline constexpr ComMethodMeta kMeta_GetParent = {6, 3, false};
+inline constexpr uint32_t kGetAdapter = 7;
+inline constexpr ComMethodMeta kMeta_GetAdapter = {7, 2, false};
+inline constexpr uint32_t kSetMaximumFrameLatency = 12;
+inline constexpr ComMethodMeta kMeta_SetMaximumFrameLatency = {12, 2, false};
+inline constexpr uint32_t kGetMaximumFrameLatency = 13;
+inline constexpr ComMethodMeta kMeta_GetMaximumFrameLatency = {13, 2, false};
+} // namespace DXGIDeviceSlots
 
 namespace D3D11DeviceSlots {
 inline constexpr size_t kSlotCount = 43;
@@ -301,6 +328,7 @@ inline constexpr size_t slot_count_for(ComIfaceId id) {
         case ComIfaceId::DXGIAdapter1: return 11;
         case ComIfaceId::DXGIFactory1: return 14;
         case ComIfaceId::DXGISwapChain: return 18;
+        case ComIfaceId::DXGIDevice: return 14;
         case ComIfaceId::D3D11Device: return 43;
         case ComIfaceId::D3D11DeviceContext: return 115;
         case ComIfaceId::DXGIOutput: return 19;

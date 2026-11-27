@@ -128,20 +128,31 @@ inline bool validate_module(const uint32_t* words, size_t count) {
 // with embedded Vulkan 1.0 SPIR-V shaders ready for single-draw in-swapchain compositing.
 class TouchOverlayVk {
 public:
-    void set_enabled(bool enabled) { enabled_.store(enabled, std::memory_order_relaxed); }
-    bool enabled() const { return enabled_.load(std::memory_order_relaxed); }
+    void set_enabled(bool enabled) {
+        if (enabled_.exchange(enabled, std::memory_order_acq_rel) != enabled) {
+            last_revision_.store(0, std::memory_order_release);
+        }
+    }
+    bool enabled() const { return enabled_.load(std::memory_order_acquire); }
+    uint64_t last_revision() const { return last_revision_.load(std::memory_order_acquire); }
 
     void attach_vulkan_loader(PfnGetInstanceProcAddr gipa) { get_instance_proc_addr_ = gipa; }
     bool has_vulkan_loader() const { return get_instance_proc_addr_ != nullptr; }
 
-    // Packs normalized [0..1] screen quads into Vulkan NDC triangles (6 vertices per quad).
-    size_t pack_quads(const std::vector<input::HudQuad>& quads) {
+    // Zero-allocation raw-array packer with dirty-revision tracking for hot-path Present
+    size_t pack_quads_raw(const input::HudQuad* quads, size_t count, uint64_t revision = 0) {
         std::lock_guard<std::mutex> lk(mu_);
         vertices_.clear();
-        if (!enabled() || quads.empty()) return 0;
+        if (!enabled() || !quads || count == 0) {
+            if (revision) last_revision_.store(revision, std::memory_order_release);
+            return 0;
+        }
 
-        vertices_.reserve(quads.size() * 6);
-        for (const auto& q : quads) {
+        if (vertices_.capacity() < count * 6) {
+            vertices_.reserve(count * 6);
+        }
+        for (size_t i = 0; i < count; ++i) {
+            const auto& q = quads[i];
             const float x0 = std::clamp(q.x0 * 2.0f - 1.0f, -1.0f, 1.0f);
             const float y0 = std::clamp(q.y0 * 2.0f - 1.0f, -1.0f, 1.0f);
             const float x1 = std::clamp(q.x1 * 2.0f - 1.0f, -1.0f, 1.0f);
@@ -160,7 +171,13 @@ public:
             vertices_.push_back({x1, y1, r, g, b, a});
             vertices_.push_back({x1, y0, r, g, b, a});
         }
+        if (revision) last_revision_.store(revision, std::memory_order_release);
         return vertices_.size();
+    }
+
+    // Packs normalized [0..1] screen quads into Vulkan NDC triangles (6 vertices per quad).
+    size_t pack_quads(const std::vector<input::HudQuad>& quads) {
+        return pack_quads_raw(quads.data(), quads.size(), 0);
     }
 
     const std::vector<HudVertex>& vertices() const { return vertices_; }
@@ -255,6 +272,7 @@ public:
 private:
     mutable std::mutex mu_;
     std::atomic<bool> enabled_{true};
+    std::atomic<uint64_t> last_revision_{0};
     PfnGetInstanceProcAddr get_instance_proc_addr_ = nullptr;
     std::vector<HudVertex> vertices_;
     VkDrawBindings bindings_{};

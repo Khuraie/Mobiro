@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <vector>
@@ -33,13 +34,23 @@ struct HudQuad {
 class TouchController {
 public:
     static constexpr size_t kMaxButtons = 13;
+    static constexpr size_t kMaxHudQuads = kMaxButtons + 2;
 
     TouchController() { reset_default_sekiro_layout(); }
 
     void set_viewport(float width, float height) {
         vw_ = (width > 1.0f) ? width : 1920.0f;
         vh_ = (height > 1.0f) ? height : 1080.0f;
+        revision_.fetch_add(1, std::memory_order_release);
     }
+
+    void set_opacity(float alpha_scale) {
+        opacity_.store(std::clamp(alpha_scale, 0.0f, 1.0f), std::memory_order_release);
+        revision_.fetch_add(1, std::memory_order_release);
+    }
+
+    float opacity() const { return opacity_.load(std::memory_order_acquire); }
+    uint64_t revision() const { return revision_.load(std::memory_order_acquire); }
 
     void reset_default_sekiro_layout() {
         // Ergonomic landscape combat layout prioritizing instant L1 Deflect, R1 Attack & Healing Gourd (D-Pad Up)
@@ -76,6 +87,7 @@ public:
             if (btn >= 0) {
                 button_pointer_[btn] = pointer_id;
                 apply_button(btn, true, router);
+                revision_.fetch_add(1, std::memory_order_release);
                 return;
             }
             // 2. Left half -> floating movement thumbstick
@@ -86,6 +98,7 @@ public:
                 left_curr_x_ = nx;
                 left_curr_y_ = ny;
                 router.set_left_stick(0.0f, 0.0f);
+                revision_.fetch_add(1, std::memory_order_release);
                 return;
             }
             // 3. Right half -> relative camera look
@@ -106,6 +119,7 @@ public:
                 const float dx = ((nx - left_origin_x_) * aspect) / kStickMaxRadius;
                 const float dy = -((ny - left_origin_y_)) / kStickMaxRadius; // Up is +Y in XInput
                 router.set_left_stick(std::clamp(dx, -1.0f, 1.0f), std::clamp(dy, -1.0f, 1.0f));
+                revision_.fetch_add(1, std::memory_order_release);
             } else if (pointer_id == right_look_ptr_) {
                 const float dx = (nx - right_prev_x_) * kCameraSensitivity;
                 const float dy = -(ny - right_prev_y_) * kCameraSensitivity;
@@ -117,19 +131,25 @@ public:
         }
 
         // TouchAction::Up
+        bool hud_changed = false;
         for (size_t i = 0; i < kMaxButtons; ++i) {
             if (button_pointer_[i] == pointer_id) {
                 button_pointer_[i] = -1;
                 apply_button(static_cast<int>(i), false, router);
+                hud_changed = true;
             }
         }
         if (pointer_id == left_stick_ptr_) {
             left_stick_ptr_ = -1;
             router.set_left_stick(0.0f, 0.0f);
+            hud_changed = true;
         }
         if (pointer_id == right_look_ptr_) {
             right_look_ptr_ = -1;
             router.set_right_stick(0.0f, 0.0f);
+        }
+        if (hud_changed) {
+            revision_.fetch_add(1, std::memory_order_release);
         }
     }
 
@@ -140,36 +160,46 @@ public:
         }
     }
 
-    // Emits screen-space HUD quads for in-swapchain Vulkan rendering
-    std::vector<HudQuad> build_hud_quads() const {
-        std::vector<HudQuad> quads;
-        quads.reserve(kMaxButtons + 2);
-        const float inv_aspect = vh_ / vw_;
+    // Zero-allocation HUD quad emitter for hot-path IDXGISwapChain::Present
+    size_t fill_hud_quads(HudQuad* out, size_t max_quads) const {
+        const float alpha_scale = opacity_.load(std::memory_order_acquire);
+        if (!out || max_quads == 0 || alpha_scale <= 0.01f) return 0;
 
-        for (size_t i = 0; i < kMaxButtons; ++i) {
+        size_t count = 0;
+        const float inv_aspect = vh_ / vw_;
+        for (size_t i = 0; i < kMaxButtons && count < max_quads; ++i) {
             const auto& b = buttons_[i];
             const bool active = (button_pointer_[i] != -1);
             const float rx = b.radius * inv_aspect;
             const float ry = b.radius;
-            quads.push_back({
+            out[count++] = {
                 b.cx - rx, b.cy - ry, b.cx + rx, b.cy + ry,
                 active ? 1.0f : 0.85f,
                 active ? 0.65f : 0.85f,
                 active ? 0.15f : 0.85f,
-                active ? 0.70f : 0.28f
-            });
+                (active ? 0.70f : 0.28f) * alpha_scale
+            };
         }
-        if (left_stick_ptr_ != -1) {
+        if (left_stick_ptr_ != -1 && count + 2 <= max_quads) {
             const float rx = kStickMaxRadius * inv_aspect;
             const float ry = kStickMaxRadius;
-            quads.push_back({left_origin_x_ - rx, left_origin_y_ - ry,
-                             left_origin_x_ + rx, left_origin_y_ + ry, 0.8f, 0.8f, 0.8f, 0.20f});
+            out[count++] = {left_origin_x_ - rx, left_origin_y_ - ry,
+                            left_origin_x_ + rx, left_origin_y_ + ry,
+                            0.8f, 0.8f, 0.8f, 0.20f * alpha_scale};
             const float krx = 0.035f * inv_aspect;
             const float kry = 0.035f;
-            quads.push_back({left_curr_x_ - krx, left_curr_y_ - kry,
-                             left_curr_x_ + krx, left_curr_y_ + kry, 1.0f, 0.9f, 0.5f, 0.65f});
+            out[count++] = {left_curr_x_ - krx, left_curr_y_ - kry,
+                            left_curr_x_ + krx, left_curr_y_ + kry,
+                            1.0f, 0.9f, 0.5f, 0.65f * alpha_scale};
         }
-        return quads;
+        return count;
+    }
+
+    // Emits screen-space HUD quads for in-swapchain Vulkan rendering
+    std::vector<HudQuad> build_hud_quads() const {
+        HudQuad buf[kMaxHudQuads];
+        const size_t n = fill_hud_quads(buf, kMaxHudQuads);
+        return std::vector<HudQuad>(buf, buf + n);
     }
 
 private:
@@ -203,6 +233,7 @@ private:
         right_look_ptr_ = -1;
         lt_pressed_ = false;
         rt_pressed_ = false;
+        revision_.fetch_add(1, std::memory_order_release);
     }
 
     void release_all_and_sync(InputRouter& router) {
@@ -217,6 +248,7 @@ private:
         router.set_left_stick(0.0f, 0.0f);
         router.set_right_stick(0.0f, 0.0f);
         router.set_triggers(0.0f, 0.0f);
+        revision_.fetch_add(1, std::memory_order_release);
     }
 
     static constexpr float kStickMaxRadius = 0.14f;
@@ -233,6 +265,8 @@ private:
     float right_prev_x_ = 0.0f, right_prev_y_ = 0.0f;
     bool lt_pressed_ = false;
     bool rt_pressed_ = false;
+    std::atomic<float> opacity_{1.0f};
+    std::atomic<uint64_t> revision_{1};
 };
 
 } // namespace mobiro::input

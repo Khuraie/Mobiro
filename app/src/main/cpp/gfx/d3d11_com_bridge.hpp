@@ -208,6 +208,18 @@ public:
             }
         }
 
+        // Handle ID3D11DeviceContext::GetResourceMinLOD (slot 56) float return in XMM0
+        if constexpr (Slot == 56) {
+            if (proxy->iface == d3d11_abi::ComIfaceId::D3D11DeviceContext) {
+                using GetMinLodFn = float (*)(void*, void*);
+                auto fn = reinterpret_cast<GetMinLodFn>(native_vtbl[Slot]);
+                void* res = reinterpret_cast<void*>(self.unwrap_arg(rdx));
+                cpu::emu_set_xmm_f32(emu, 0, fn(proxy->native_obj, res));
+                rax = 0ULL;
+                return;
+            }
+        }
+
         uint64_t a1 = self.unwrap_arg(rdx);
         uint64_t a2 = self.unwrap_arg(r8);
         uint64_t a3 = self.unwrap_arg(r9);
@@ -305,11 +317,23 @@ public:
         } else if constexpr (Slot >= 4 && Slot <= 10) {
             if (proxy->iface == d3d11_abi::ComIfaceId::D3D11Device && hr_ok) {
                 self.wrap_out_ptr(r9, d3d11_abi::ComIfaceId::D3D11ResourceChild); // CreateTexture*/SRV/UAV/RTV/DSV
+            } else if constexpr (Slot == 6) {
+                // IDXGIObject::GetParent(REFIID riid, void** ppParent)
+                if (hr_ok && r8 &&
+                    (proxy->iface == d3d11_abi::ComIfaceId::DXGIFactory1 ||
+                     proxy->iface == d3d11_abi::ComIfaceId::DXGIAdapter1 ||
+                     proxy->iface == d3d11_abi::ComIfaceId::DXGISwapChain ||
+                     proxy->iface == d3d11_abi::ComIfaceId::DXGIOutput ||
+                     proxy->iface == d3d11_abi::ComIfaceId::DXGIDevice)) {
+                    self.wrap_out_ptr(r8, classify_iid(reinterpret_cast<const uint8_t*>(rdx)));
+                }
             } else if constexpr (Slot == 7) {
                 if (proxy->iface == d3d11_abi::ComIfaceId::DXGIFactory1 && hr_ok) {
                     self.wrap_out_ptr(r8, d3d11_abi::ComIfaceId::DXGIAdapter1); // EnumAdapters
                 } else if (proxy->iface == d3d11_abi::ComIfaceId::DXGIAdapter1 && hr_ok) {
                     self.wrap_out_ptr(r8, d3d11_abi::ComIfaceId::DXGIOutput); // EnumOutputs
+                } else if (proxy->iface == d3d11_abi::ComIfaceId::DXGIDevice && hr_ok) {
+                    self.wrap_out_ptr(rdx, d3d11_abi::ComIfaceId::DXGIAdapter1); // IDXGIDevice::GetAdapter
                 }
             } else if constexpr (Slot == 9) {
                 if (proxy->iface == d3d11_abi::ComIfaceId::DXGISwapChain && hr_ok) {
@@ -337,6 +361,10 @@ public:
         } else if constexpr (Slot == 13 || Slot == 15 || Slot == 16 || Slot == 17 || Slot == 18) {
             if (proxy->iface == d3d11_abi::ComIfaceId::D3D11Device && hr_ok && sp) {
                 self.wrap_out_ptr(sp[5], d3d11_abi::ComIfaceId::D3D11ResourceChild); // Create*Shader (arg4)
+            } else if constexpr (Slot == 15) {
+                if (proxy->iface == d3d11_abi::ComIfaceId::DXGISwapChain && hr_ok) {
+                    self.wrap_out_ptr(rdx, d3d11_abi::ComIfaceId::DXGIOutput); // GetContainingOutput
+                }
             }
         } else if constexpr (Slot == 19) {
             if (proxy->iface == d3d11_abi::ComIfaceId::D3D11Device && hr_ok) {
@@ -400,17 +428,25 @@ private:
         switch (d1) {
             case 0x770AAE78u: // IDXGIFactory1
             case 0x7B7166ECu: // IDXGIFactory
+            case 0x50C83A1Cu: // IDXGIFactory2
                 return d3d11_abi::ComIfaceId::DXGIFactory1;
             case 0x29038F61u: // IDXGIAdapter1
             case 0x2411E7E1u: // IDXGIAdapter
+            case 0x0AA1AE0Au: // IDXGIAdapter2
                 return d3d11_abi::ComIfaceId::DXGIAdapter1;
             case 0x310D36A0u: // IDXGISwapChain
+            case 0x790A45F7u: // IDXGISwapChain1
                 return d3d11_abi::ComIfaceId::DXGISwapChain;
+            case 0x54EC77FAu: // IDXGIDevice
+            case 0x77DB970Fu: // IDXGIDevice1
+                return d3d11_abi::ComIfaceId::DXGIDevice;
             case 0xAE02EEDBu: // IDXGIOutput
                 return d3d11_abi::ComIfaceId::DXGIOutput;
             case 0xDB6F6DDBu: // ID3D11Device
+            case 0xA04BFB29u: // ID3D11Device1
                 return d3d11_abi::ComIfaceId::D3D11Device;
             case 0xC0BFA96Cu: // ID3D11DeviceContext
+            case 0xBB2C6FAAu: // ID3D11DeviceContext1
                 return d3d11_abi::ComIfaceId::D3D11DeviceContext;
             default:
                 return d3d11_abi::ComIfaceId::D3D11ResourceChild;

@@ -2879,6 +2879,110 @@ void test_m28_d3d11_create_shader_state_wrap_and_gs_unwrap() {
     }
 }
 
+void test_m29_dxgi_get_parent_adapter_min_lod_and_yield() {
+    struct FakeObj { void** vtbl; uint32_t id; };
+    static FakeObj g_dxgi_dev{nullptr, 1}, g_adapter{nullptr, 2}, g_factory{nullptr, 3}, g_output{nullptr, 4};
+
+    static void* vtbl_dev[43] = {};
+    vtbl_dev[0] = reinterpret_cast<void*>(+[](void*, const void*, void** ppv) -> uint64_t { *ppv = &g_dxgi_dev; return 0; });
+    vtbl_dev[2] = reinterpret_cast<void*>(+[](void*) -> uint64_t { return 0; });
+    static void* vtbl_dxgi_dev[14] = {};
+    vtbl_dxgi_dev[2] = vtbl_dev[2];
+    vtbl_dxgi_dev[7] = reinterpret_cast<void*>(+[](void*, void** pp) -> uint64_t { *pp = &g_adapter; return 0; });
+    static void* vtbl_adapter[11] = {};
+    vtbl_adapter[2] = vtbl_dev[2];
+    vtbl_adapter[6] = reinterpret_cast<void*>(+[](void*, const void*, void** pp) -> uint64_t { *pp = &g_factory; return 0; });
+    static void* vtbl_sc[18] = {};
+    vtbl_sc[2] = vtbl_dev[2];
+    vtbl_sc[15] = reinterpret_cast<void*>(+[](void*, void** pp) -> uint64_t { *pp = &g_output; return 0; });
+    static void* vtbl_ctx[115] = {};
+    vtbl_ctx[2] = vtbl_dev[2];
+    vtbl_ctx[56] = reinterpret_cast<void*>(+[](void*, void* res) -> float { return res ? 2.5f : -1.0f; });
+
+    g_dxgi_dev.vtbl = vtbl_dxgi_dev;
+    g_adapter.vtbl = vtbl_adapter;
+    g_factory.vtbl = vtbl_dev;
+    g_output.vtbl = vtbl_dev;
+    FakeObj native_dev{vtbl_dev, 10}, native_sc{vtbl_sc, 11}, native_ctx{vtbl_ctx, 12}, native_tex{vtbl_dev, 13};
+
+    auto& br = mobiro::gfx::D3D11ComBridge::global();
+    void* dev_p = br.wrap(&native_dev, mobiro::gfx::d3d11_abi::ComIfaceId::D3D11Device);
+    void* sc_p  = br.wrap(&native_sc, mobiro::gfx::d3d11_abi::ComIfaceId::DXGISwapChain);
+    void* ctx_p = br.wrap(&native_ctx, mobiro::gfx::d3d11_abi::ComIfaceId::D3D11DeviceContext);
+    void* tex_p = br.wrap(&native_tex, mobiro::gfx::d3d11_abi::ComIfaceId::D3D11ResourceChild);
+
+    x64emu_t emu{};
+    const uint32_t iid_dxgi_dev[4] = {0x54EC77FAu, 0, 0, 0};
+    const uint32_t iid_factory1[4] = {0x770AAE78u, 0, 0, 0};
+
+    // Device::QueryInterface(IDXGIDevice) -> GetAdapter() -> GetParent(IDXGIFactory1)
+    void *dxgi_dev_p = nullptr, *adapter_p = nullptr, *factory_p = nullptr, *output_p = nullptr;
+    emu.rcx = reinterpret_cast<uint64_t>(dev_p);
+    emu.rdx = reinterpret_cast<uint64_t>(iid_dxgi_dev);
+    emu.r8  = reinterpret_cast<uint64_t>(&dxgi_dev_p);
+    mobiro::gfx::D3D11ComBridge::dispatch_slot<0>(&emu);
+    assert(dxgi_dev_p && br.find_proxy(reinterpret_cast<uintptr_t>(dxgi_dev_p))->iface == mobiro::gfx::d3d11_abi::ComIfaceId::DXGIDevice);
+
+    emu.rcx = reinterpret_cast<uint64_t>(dxgi_dev_p);
+    emu.rdx = reinterpret_cast<uint64_t>(&adapter_p);
+    mobiro::gfx::D3D11ComBridge::dispatch_slot<7>(&emu);
+    assert(adapter_p && br.find_proxy(reinterpret_cast<uintptr_t>(adapter_p))->iface == mobiro::gfx::d3d11_abi::ComIfaceId::DXGIAdapter1);
+
+    emu.rcx = reinterpret_cast<uint64_t>(adapter_p);
+    emu.rdx = reinterpret_cast<uint64_t>(iid_factory1);
+    emu.r8  = reinterpret_cast<uint64_t>(&factory_p);
+    mobiro::gfx::D3D11ComBridge::dispatch_slot<6>(&emu);
+    assert(factory_p && br.find_proxy(reinterpret_cast<uintptr_t>(factory_p))->iface == mobiro::gfx::d3d11_abi::ComIfaceId::DXGIFactory1);
+
+    // IDXGISwapChain::GetContainingOutput (slot 15) -> DXGIOutput
+    emu.rcx = reinterpret_cast<uint64_t>(sc_p);
+    emu.rdx = reinterpret_cast<uint64_t>(&output_p);
+    mobiro::gfx::D3D11ComBridge::dispatch_slot<15>(&emu);
+    assert(output_p && br.find_proxy(reinterpret_cast<uintptr_t>(output_p))->iface == mobiro::gfx::d3d11_abi::ComIfaceId::DXGIOutput);
+
+    // ID3D11DeviceContext::GetResourceMinLOD (slot 56) -> float in XMM0
+    emu.rcx = reinterpret_cast<uint64_t>(ctx_p);
+    emu.rdx = reinterpret_cast<uint64_t>(tex_p);
+    mobiro::gfx::D3D11ComBridge::dispatch_slot<56>(&emu);
+    assert(mobiro::cpu::emu_xmm_f32(&emu, 0) == 2.5f);
+
+    for (void* p : {output_p, factory_p, adapter_p, dxgi_dev_p, tex_p, ctx_p, sc_p, dev_p}) {
+        emu.rcx = reinterpret_cast<uint64_t>(p);
+        mobiro::gfx::D3D11ComBridge::dispatch_slot<2>(&emu);
+    }
+}
+
+void test_m30_zero_alloc_dirty_hud_and_opacity() {
+    mobiro::input::InputRouter router;
+    mobiro::input::TouchController tc;
+    mobiro::gfx::TouchOverlayVk ov;
+
+    tc.set_viewport(1920.0f, 1080.0f);
+    const uint64_t rev0 = tc.revision();
+    mobiro::input::HudQuad quads[mobiro::input::TouchController::kMaxHudQuads];
+    const size_t n0 = tc.fill_hud_quads(quads, mobiro::input::TouchController::kMaxHudQuads);
+    assert(n0 == mobiro::input::TouchController::kMaxButtons);
+    assert(ov.pack_quads_raw(quads, n0, rev0) == n0 * 6);
+    assert(ov.last_revision() == rev0);
+
+    // Unchanged state keeps revision identical -> hot-path Present skips repack
+    assert(tc.revision() == rev0);
+
+    // Opacity 0.5 scales alpha and bumps revision; opacity 0 hides quads cleanly
+    tc.set_opacity(0.5f);
+    const uint64_t rev1 = tc.revision();
+    assert(rev1 > rev0);
+    const size_t n1 = tc.fill_hud_quads(quads, mobiro::input::TouchController::kMaxHudQuads);
+    assert(n1 == n0 && quads[0].a < 0.20f);
+    assert(ov.pack_quads_raw(quads, n1, rev1) == n1 * 6);
+    assert(ov.last_revision() == rev1);
+
+    tc.set_opacity(0.0f);
+    assert(tc.fill_hud_quads(quads, mobiro::input::TouchController::kMaxHudQuads) == 0);
+    ov.set_enabled(false);
+    assert(ov.last_revision() == 0);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -2976,6 +3080,8 @@ int main(int argc, char** argv) {
     test_m26_turnip_wsi_extension_filter();
     test_m27_turnip_wsi_scaled_extent();
     test_m28_d3d11_create_shader_state_wrap_and_gs_unwrap();
+    test_m29_dxgi_get_parent_adapter_min_lod_and_yield();
+    test_m30_zero_alloc_dirty_hud_and_opacity();
     std::cout << "All Mobiro core unit tests passed.\n";
     return 0;
 }

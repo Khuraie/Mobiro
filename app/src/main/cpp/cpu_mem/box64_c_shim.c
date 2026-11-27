@@ -30,6 +30,13 @@ float mobiro_box64_xmm_f32(const x64emu_t* emu, int xmm_idx) {
     return emu->xmm[xmm_idx].f[0];
 }
 
+void mobiro_box64_set_xmm_f32(x64emu_t* emu, int xmm_idx, float val) {
+    if (!emu || xmm_idx < 0 || xmm_idx >= 16) return;
+    emu->xmm[xmm_idx].q[0] = 0;
+    emu->xmm[xmm_idx].q[1] = 0;
+    emu->xmm[xmm_idx].f[0] = val;
+}
+
 uintptr_t mobiro_box64_teb(const x64emu_t* emu) {
     return emu ? emu->segs_offs[_GS] : 0;
 }

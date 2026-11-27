@@ -220,6 +220,10 @@ extern "C" JNIEXPORT jstring JNICALL
 Java_com_mobiro_runtime_MainActivity_nativeConfigureAndValidate(
     JNIEnv* env, jobject /*thiz*/, jstring jGameDir, jstring jSaveDir, jstring jCacheDir,
     jstring jNativeLibDir, jboolean jSelfTest) {
+    if (g_rt.configured.load(std::memory_order_acquire) &&
+        !g_rt.guest_exited.load(std::memory_order_acquire)) {
+        return env->NewStringUTF("Container already running.");
+    }
     const char* c_game  = env->GetStringUTFChars(jGameDir, nullptr);
     const char* c_save  = env->GetStringUTFChars(jSaveDir, nullptr);
     const char* c_cache = env->GetStringUTFChars(jCacheDir, nullptr);
@@ -334,7 +338,14 @@ Java_com_mobiro_runtime_MainActivity_nativeConfigureAndValidate(
     g_rt.dxvk_loaded.store(dxvk_loaded, std::memory_order_relaxed);
     mobiro::gfx::D3D11ComBridge::global().set_present_hook_fast(
         +[](void*, uint32_t, uint32_t) {
-            g_rt.touch_overlay.pack_quads(g_rt.touch_ctrl.build_hud_quads());
+            // Zero-alloc dirty check: skips quad build & mutex lock when touch state is unchanged
+            const uint64_t rev = g_rt.touch_ctrl.revision();
+            if (g_rt.touch_overlay.last_revision() != rev) {
+                mobiro::input::HudQuad quads[mobiro::input::TouchController::kMaxHudQuads];
+                const size_t n = g_rt.touch_ctrl.fill_hud_quads(
+                    quads, mobiro::input::TouchController::kMaxHudQuads);
+                g_rt.touch_overlay.pack_quads_raw(quads, n, rev);
+            }
             const int64_t work_ns = mobiro::gfx::DxvkInterop::global().pace_present();
             if (work_ns > 0) g_rt.balancer.report_frame_work(work_ns);
         });
@@ -452,6 +463,24 @@ Java_com_mobiro_runtime_MainActivity_nativeOnThermalHeadroom(
         mobiro::gfx::DxvkInterop::global().set_target_fps(desired);
         g_rt.balancer.update_target_work_duration((desired <= 30) ? 33'333'333LL : 16'666'666LL);
     }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_mobiro_runtime_MainActivity_nativeApplyRuntimeSettings(
+    JNIEnv* /*env*/, jobject /*thiz*/, jint targetFps, jint maxRenderHeight, jfloat hudOpacity) {
+    const int fps = (targetFps <= 30) ? 30 : 60;
+    g_rt.target_fps.store(fps, std::memory_order_relaxed);
+    mobiro::gfx::DxvkInterop::global().set_target_fps(fps);
+    g_rt.balancer.update_target_work_duration((fps <= 30) ? 33'333'333LL : 16'666'666LL);
+
+    if (maxRenderHeight >= 0 && maxRenderHeight <= 4320) {
+        mobiro::gfx::TurnipWsiShim::global().set_max_render_height(static_cast<uint32_t>(maxRenderHeight));
+    }
+    const float alpha = std::clamp(static_cast<float>(hudOpacity), 0.0f, 1.0f);
+    g_rt.touch_ctrl.set_opacity(alpha);
+    g_rt.touch_overlay.set_enabled(alpha > 0.01f);
+    mobiro_boot_log("Runtime settings applied: fps=%d maxH=%u hudAlpha=%.2f",
+                    fps, mobiro::gfx::TurnipWsiShim::global().max_render_height(), alpha);
 }
 
 namespace {

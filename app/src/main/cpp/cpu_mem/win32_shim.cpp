@@ -2196,6 +2196,16 @@ void thunk_ExitProcess(x64emu_t* emu) {
     emu_request_quit(emu);
 }
 
+void thunk_FreeLibraryAndExitThread(x64emu_t* emu) {
+    reg_rax(emu) = reg_rdx(emu);
+    emu_request_quit(emu);
+}
+
+void thunk_NtYieldExecution(x64emu_t* emu) {
+    std::this_thread::yield();
+    reg_rax(emu) = 0ULL; // STATUS_SUCCESS
+}
+
 void thunk_TerminateProcess(x64emu_t* emu) {
     const uint64_t hproc = reg_rcx(emu);
     const uint64_t code = reg_rdx(emu);
@@ -2970,14 +2980,13 @@ void Box64Bridge::register_default_win32_thunks() {
     register_thunk("kernel32.dll", "GetExitCodeThread", &thunk_GetExitCodeProcessOrThread);
     register_thunk("kernel32.dll", "GetProcessId", &thunk_GetCurrentProcessId);
     register_thunk("kernel32.dll", "GetThreadId", &thunk_GetCurrentThreadId);
-    register_thunk("kernel32.dll", "SwitchToThread", &thunk_ReturnTrue);
-    register_thunk("kernel32.dll", "ExitThread", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "ExitThread", &thunk_ExitProcess);
     register_thunk("kernel32.dll", "TerminateThread", &thunk_ReturnTrue);
     register_thunk("kernel32.dll", "ReadProcessMemory", &thunk_ReadWriteProcessMemory);
     register_thunk("kernel32.dll", "WriteProcessMemory", &thunk_WriteProcessMemory);
     register_thunk("kernel32.dll", "VirtualProtectEx", &thunk_VirtualProtectEx);
     register_thunk("kernel32.dll", "GetModuleHandleExA", &thunk_GetModuleHandleExA);
-    register_thunk("kernel32.dll", "FreeLibraryAndExitThread", &thunk_ReturnZero);
+    register_thunk("kernel32.dll", "FreeLibraryAndExitThread", &thunk_FreeLibraryAndExitThread);
     register_thunk("kernel32.dll", "GetCommandLineA", &thunk_GetCommandLineA);
     register_thunk("kernel32.dll", "GetStartupInfoA", &thunk_GetStartupInfoA);
     register_thunk("kernel32.dll", "GetCurrentDirectoryA", &thunk_GetCurrentDirectoryA);
@@ -2990,7 +2999,6 @@ void Box64Bridge::register_default_win32_thunks() {
     register_thunk("kernel32.dll", "MoveFileA", &thunk_ReturnTrue);
     register_thunk("kernel32.dll", "MoveFileExA", &thunk_ReturnTrue);
     register_thunk("kernel32.dll", "CopyFileA", &thunk_ReturnTrue);
-    register_thunk("kernel32.dll", "CopyFileW", &thunk_ReturnTrue);
     register_thunk("kernel32.dll", "CreateDirectoryA", &thunk_ReturnTrue);
     register_thunk("kernel32.dll", "RemoveDirectoryA", &thunk_ReturnTrue);
     register_thunk("kernel32.dll", "ExpandEnvironmentStringsA", &thunk_ExpandEnvironmentStringsA);
@@ -3101,18 +3109,21 @@ void Box64Bridge::register_default_win32_thunks() {
         "NtQueryVirtualMemory", "ZwQueryVirtualMemory",
         "NtFreeVirtualMemory", "ZwFreeVirtualMemory",
         "NtFlushInstructionCache", "ZwFlushInstructionCache",
-        "NtYieldExecution", "ZwYieldExecution",
         "NtDuplicateObject", "ZwDuplicateObject",
         "NtSuspendThread", "NtResumeThread",
         "NtGetContextThread", "NtSetContextThread",
         "NtRaiseHardError", "NtRaiseException",
         "RtlNtStatusToDosError", "RtlVerifyVersionInfo",
         "RtlAddVectoredExceptionHandler", "RtlRemoveVectoredExceptionHandler",
-        "RtlCaptureStackBackTrace", "RtlExitUserThread", "RtlExitUserProcess"
+        "RtlCaptureStackBackTrace"
     };
     for (const char* sym : ntdll_ok) {
         register_thunk("ntdll.dll", sym, &thunk_ReturnZero);
     }
+    register_thunk("ntdll.dll", "NtYieldExecution", &thunk_NtYieldExecution);
+    register_thunk("ntdll.dll", "ZwYieldExecution", &thunk_NtYieldExecution);
+    register_thunk("ntdll.dll", "RtlExitUserThread", &thunk_ExitProcess);
+    register_thunk("ntdll.dll", "RtlExitUserProcess", &thunk_ExitProcess);
     register_thunk("ntdll.dll", "NtProtectVirtualMemory", &thunk_NtProtectVirtualMemory);
     register_thunk("ntdll.dll", "ZwProtectVirtualMemory", &thunk_NtProtectVirtualMemory);
     register_thunk("ntdll.dll", "NtAllocateVirtualMemory", &thunk_NtAllocateVirtualMemory);

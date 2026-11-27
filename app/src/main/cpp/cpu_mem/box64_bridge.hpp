@@ -22,6 +22,7 @@ extern "C" {
 typedef struct x64emu_s x64emu_t;
 uint64_t* mobiro_box64_reg_ptr(x64emu_t* emu, int reg_id);
 float mobiro_box64_xmm_f32(const x64emu_t* emu, int xmm_idx);
+void mobiro_box64_set_xmm_f32(x64emu_t* emu, int xmm_idx, float val);
 uintptr_t mobiro_box64_teb(const x64emu_t* emu);
 void mobiro_box64_ensure_init(void);
 void mobiro_box64_set_prot(uintptr_t addr, size_t size, int mobiro_prot);
@@ -117,14 +118,16 @@ inline float emu_xmm_f32(const x64emu_t* e, int idx) {
     return f;
 #endif
 }
-#ifndef MOBIRO_HAVE_BOX64
 inline void emu_set_xmm_f32(x64emu_t* e, int idx, float v) {
     if (!e || idx < 0 || idx >= 4) return;
+#ifdef MOBIRO_HAVE_BOX64
+    mobiro_box64_set_xmm_f32(e, idx, v);
+#else
     uint32_t bits = 0;
     std::memcpy(&bits, &v, sizeof(bits));
     e->xmm[idx] = bits;
-}
 #endif
+}
 inline uintptr_t emu_teb_va(const x64emu_t* e) {
     if (!e) return 0;
 #ifdef MOBIRO_HAVE_BOX64

@@ -6,6 +6,23 @@
 
 ## Log Entries
 
+### Increment 31 — M29–M32: Full DXGI Parent/Device COM Chain, Zero-Alloc Dirty HUD Present, Persisted Runtime Settings UI & Multi-Threaded 15,360-Draw 3D Self-Test (2026-11-27)
+- **Status:** Implemented & verified (local MSVC 2022 tests `30/30` + retail `--verify-byof` + GitHub Actions CI + MinGW PE64 `--verify-pe` + bundled ARM64 APK)
+- **Changes:**
+  - **M29 (DXGI/D3D11/Win32 Real-Game ABI Hardening):**
+    - Added `DXGIDevice` (`14` slots, `IDXGIDevice`/`IDXGIDevice1`) + `IDXGIObject::GetParent` (slot 6) + `IDXGISwapChain::GetContainingOutput` (slot 15) COM proxy wrapping and expanded `classify_iid()` to DXGI 1.2 / D3D11.1 IIDs (`scripts/gen_d3d11_thunks.py`, `d3d11_com_thunks_gen.hpp`, `d3d11_com_bridge.hpp`).
+    - Added `mobiro_box64_set_xmm_f32` (`box64_c_shim.c`, `box64_bridge.hpp`) and wired `ID3D11DeviceContext::GetResourceMinLOD` (slot 56) scalar float return into Win64 `XMM0`.
+    - Fixed duplicate thunk overwrites in `win32_shim.cpp` (`SwitchToThread` was overwritten by `thunk_ReturnTrue`, `CopyFileW` dead stub removed) and wired `ExitThread`, `FreeLibraryAndExitThread`, `RtlExitUserThread`, `RtlExitUserProcess` to clean `emu_request_quit()` + real `NtYieldExecution`/`ZwYieldExecution`.
+  - **M30 (Zero-Alloc Dirty-Tracked `Present` HUD):**
+    - Added atomic `revision()` + `set_opacity()` + zero-alloc `fill_hud_quads()` to `TouchController` (`touch_controller.hpp`) and `pack_quads_raw(..., rev)` + `last_revision()` to `TouchOverlayVk` (`touch_overlay_vk.hpp`), eliminating per-frame `std::vector` heap allocation and mutex locking inside `IDXGISwapChain::Present` when touch input is unchanged (`runtime_main.cpp`).
+  - **M31 (Persisted Runtime Settings UI & Intent Controls):**
+    - Added `nativeApplyRuntimeSettings(fps, maxRenderHeight, hudOpacity)` + re-entrancy guard in `runtime_main.cpp` and a lightweight floating `⚙` settings dialog + `SharedPreferences` + Intent extras (`--ei fps`, `--ei max_height`, `--ef hud_alpha`) in `MainActivity.kt` (FPS cap 60/30, Render Scale 720p/900p/Native, Touch HUD Opacity 100%/50%/Hidden, Self-Test launcher, BYOF picker).
+  - **M32 (Multi-Threaded 15,360-Draw 3D Self-Test & Regression Suites):**
+    - Expanded `tools/mobiro_selftest.c` to generate its 64×64 texture on a Win64 worker thread (`CreateThread`/`ExitThread`/`WaitForSingleObject`), probe `IDXGISwapChain::GetParent(IDXGIFactory1)`, bind `ID3D11DepthStencilState` + `ID3D11BlendState`, and issue **128 `DrawIndexed`/frame** (15,360 GPU draws across 120 frames at 60 FPS).
+    - Added `test_m29_dxgi_get_parent_adapter_min_lod_and_yield` and `test_m30_zero_alloc_dirty_hud_and_opacity` in `tests/test_core.cpp` (30/30 suites passing).
+
+---
+
 ### Increment 30 — M28: Fix Critical D3D11 `Create*` Slot-Collision COM Wrapping Bugs & Upgrade Clean-Room Self-Test to Real 3D DXBC Textured/Depth Pipeline (2026-11-27)
 - **Status:** Implemented & verified (local MSVC 2022 tests + retail `--verify-byof` + GitHub Actions CI + MinGW PE64 + bundled ARM64 APK)
 - **Changes:**

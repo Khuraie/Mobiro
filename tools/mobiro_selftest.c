@@ -49,6 +49,11 @@ DLLIMP int32_t WINAPI QueryPerformanceFrequency(int64_t* freq);
 DLLIMP int32_t WINAPI QueryPerformanceCounter(int64_t* cnt);
 DLLIMP void*   WINAPI LoadLibraryA(const char* name);
 DLLIMP void*   WINAPI GetProcAddress(void* mod, const char* sym);
+DLLIMP void*   WINAPI CreateThread(void* sec, uint64_t stack_sz, uint32_t (WINAPI *fn)(void*),
+                                   void* param, uint32_t flags, uint32_t* tid);
+DLLIMP uint32_t WINAPI WaitForSingleObject(void* handle, uint32_t ms);
+DLLIMP int32_t WINAPI CloseHandle(void* handle);
+DLLIMP void    WINAPI ExitThread(uint32_t code);
 DLLIMP void    WINAPI ExitProcess(uint32_t code);
 
 DLLIMP void*   WINAPI CreateWindowExW(uint32_t ex, const uint16_t* cls, const uint16_t* title,
@@ -148,7 +153,28 @@ typedef struct {
 
 typedef struct { float x, y, w, h, min_d, max_d; } D3D11_VIEWPORT;
 
+typedef struct {
+    int32_t depth_en;
+    uint32_t depth_write_mask, depth_func;
+    int32_t stencil_en;
+    uint8_t stencil_read_mask, stencil_write_mask;
+    uint32_t front_fail, front_depth_fail, front_pass, front_func;
+    uint32_t back_fail, back_depth_fail, back_pass, back_func;
+} D3D11_DEPTH_STENCIL_DESC;
+
+typedef struct {
+    int32_t blend_en;
+    uint32_t src_blend, dst_blend, blend_op, src_alpha, dst_alpha, alpha_op;
+    uint8_t write_mask;
+} D3D11_RT_BLEND_DESC;
+
+typedef struct {
+    int32_t alpha_to_cov, indep_blend;
+    D3D11_RT_BLEND_DESC rt[8];
+} D3D11_BLEND_DESC;
+
 typedef uint32_t (WINAPI *PFN_Release)(void* self);
+typedef int32_t  (WINAPI *PFN_GetParent)(void* self, const GUID* riid, void** pp_parent);
 typedef int32_t  (WINAPI *PFN_Present)(void* self, uint32_t sync, uint32_t flags);
 typedef int32_t  (WINAPI *PFN_GetBuffer)(void* self, uint32_t idx, const GUID* riid, void** pp_surf);
 typedef int32_t  (WINAPI *PFN_CreateBuffer)(void* self, const D3D11_BUFFER_DESC* desc, const D3D11_SUBRESOURCE_DATA* init, void** pp_buf);
@@ -158,6 +184,8 @@ typedef int32_t  (WINAPI *PFN_CreateRTV)(void* self, void* res, const void* desc
 typedef int32_t  (WINAPI *PFN_CreateDSV)(void* self, void* res, const void* desc, void** pp_dsv);
 typedef int32_t  (WINAPI *PFN_CreateIL)(void* self, const D3D11_INPUT_ELEMENT_DESC* el, uint32_t n, const void* bc, uint64_t len, void** pp_il);
 typedef int32_t  (WINAPI *PFN_CreateShader)(void* self, const void* bc, uint64_t len, void* link, void** pp_sh);
+typedef int32_t  (WINAPI *PFN_CreateBlend)(void* self, const D3D11_BLEND_DESC* desc, void** pp_bs);
+typedef int32_t  (WINAPI *PFN_CreateDSS)(void* self, const D3D11_DEPTH_STENCIL_DESC* desc, void** pp_dss);
 typedef int32_t  (WINAPI *PFN_CreateRS)(void* self, const D3D11_RASTERIZER_DESC* desc, void** pp_rs);
 typedef int32_t  (WINAPI *PFN_CreateSamp)(void* self, const D3D11_SAMPLER_DESC* desc, void** pp_ss);
 typedef void     (WINAPI *PFN_VSSetCB)(void* self, uint32_t start, uint32_t n, void* const* cbs);
@@ -172,6 +200,8 @@ typedef void     (WINAPI *PFN_IASetVB)(void* self, uint32_t start, uint32_t n, v
 typedef void     (WINAPI *PFN_IASetIB)(void* self, void* ib, uint32_t fmt, uint32_t offset);
 typedef void     (WINAPI *PFN_IASetTopo)(void* self, uint32_t topo);
 typedef void     (WINAPI *PFN_OMSetRT)(void* self, uint32_t n, void* const* rtvs, void* dsv);
+typedef void     (WINAPI *PFN_OMSetBlend)(void* self, void* bs, const float factor[4], uint32_t mask);
+typedef void     (WINAPI *PFN_OMSetDSS)(void* self, void* dss, uint32_t stencil_ref);
 typedef void     (WINAPI *PFN_RSSetState)(void* self, void* rs);
 typedef void     (WINAPI *PFN_RSSetVP)(void* self, uint32_t n, const D3D11_VIEWPORT* vps);
 typedef void     (WINAPI *PFN_ClearRTV)(void* self, void* rtv, const float rgba[4]);
@@ -202,6 +232,18 @@ static void com_release(void* obj) {
     if (!obj) return;
     COM_OBJ* c = (COM_OBJ*)obj;
     ((PFN_Release)c->vtbl[2])(obj);
+}
+
+static uint32_t WINAPI texture_gen_worker(void* param) {
+    uint32_t* pixels = (uint32_t*)param;
+    for (uint32_t y = 0; y < 64; ++y) {
+        for (uint32_t x = 0; x < 64; ++x) {
+            const uint32_t chk = ((x >> 3) ^ (y >> 3)) & 1u;
+            pixels[y * 64 + x] = chk ? 0xFFF2C85Bu : 0xFF385A8Cu;
+        }
+    }
+    ExitThread(0);
+    return 0;
 }
 
 void WinMainCRTStartup(void) {
@@ -316,9 +358,15 @@ void WinMainCRTStartup(void) {
     void* cb = 0;
     ((PFN_CreateBuffer)((COM_OBJ*)dev)->vtbl[3])(dev, &cb_desc, 0, &cb);
 
-    // Real 3D D3D11 pipeline: DXBC VS/PS, InputLayout, VB/IB (pyramid), D24S8 depth, 64x64 texture, Sampler, RS
+    // Verify IDXGISwapChain::GetParent (slot 6) COM proxy wrapping
+    void* parent_fac = 0;
+    if (((PFN_GetParent)((COM_OBJ*)sc)->vtbl[6])(sc, &kIID_IDXGIFactory1, &parent_fac) == 0 && parent_fac) {
+        com_release(parent_fac);
+    }
+
+    // Real 3D D3D11 pipeline: DXBC VS/PS, InputLayout, VB/IB (pyramid), D24S8 depth, 64x64 texture, Sampler, RS, DSS, Blend
     void *vs = 0, *ps = 0, *il = 0, *vb = 0, *ib = 0;
-    void *depth_tex = 0, *dsv = 0, *albedo_tex = 0, *srv = 0, *samp = 0, *rs = 0;
+    void *depth_tex = 0, *dsv = 0, *albedo_tex = 0, *srv = 0, *samp = 0, *rs = 0, *dss = 0, *bs = 0;
     ((PFN_CreateShader)((COM_OBJ*)dev)->vtbl[12])(dev, kSelftestVsDxbc, sizeof(kSelftestVsDxbc), 0, &vs);
     ((PFN_CreateShader)((COM_OBJ*)dev)->vtbl[15])(dev, kSelftestPsDxbc, sizeof(kSelftestPsDxbc), 0, &ps);
 
@@ -358,12 +406,15 @@ void WinMainCRTStartup(void) {
         ((PFN_CreateDSV)((COM_OBJ*)dev)->vtbl[10])(dev, depth_tex, 0, &dsv);
     }
 
+    // Generate procedural 64x64 texture on a Win64 worker thread (exercises CreateThread + ExitThread + Wait)
     static uint32_t tex_pixels[64 * 64];
-    for (uint32_t y = 0; y < 64; ++y) {
-        for (uint32_t x = 0; x < 64; ++x) {
-            const uint32_t chk = ((x >> 3) ^ (y >> 3)) & 1u;
-            tex_pixels[y * 64 + x] = chk ? 0xFFF2C85Bu : 0xFF385A8Cu;
-        }
+    uint32_t worker_tid = 0;
+    void* worker = CreateThread(0, 0, texture_gen_worker, tex_pixels, 0, &worker_tid);
+    if (worker) {
+        WaitForSingleObject(worker, 5000u);
+        CloseHandle(worker);
+    } else {
+        for (uint32_t i = 0; i < 64 * 64; ++i) tex_pixels[i] = 0xFFF2C85Bu;
     }
     D3D11_TEXTURE2D_DESC ttd; zero_bytes(&ttd, sizeof(ttd));
     ttd.width = 64; ttd.height = 64; ttd.mip_levels = 1; ttd.array_size = 1;
@@ -386,10 +437,19 @@ void WinMainCRTStartup(void) {
     rdesc.depth_clip_en = 1;
     ((PFN_CreateRS)((COM_OBJ*)dev)->vtbl[22])(dev, &rdesc, &rs);
 
+    D3D11_DEPTH_STENCIL_DESC dsdesc; zero_bytes(&dsdesc, sizeof(dsdesc));
+    dsdesc.depth_en = 1; dsdesc.depth_write_mask = 1; dsdesc.depth_func = 2; // LESS
+    ((PFN_CreateDSS)((COM_OBJ*)dev)->vtbl[21])(dev, &dsdesc, &dss);
+
+    D3D11_BLEND_DESC bdesc; zero_bytes(&bdesc, sizeof(bdesc));
+    bdesc.rt[0].write_mask = 0x0Fu;
+    ((PFN_CreateBlend)((COM_OBJ*)dev)->vtbl[20])(dev, &bdesc, &bs);
+
     D3D11_VIEWPORT vp = {0.0f, 0.0f, 1280.0f, 720.0f, 0.0f, 1.0f};
     const uint32_t vb_stride = 20u, vb_offset = 0u;
+    const float blend_factor[4] = {1.0f, 1.0f, 1.0f, 1.0f};
 
-    // 120-frame 60 FPS 3D render (64 DrawIndexed/frame = 7,680 draws), buffer update & input pacing loop
+    // 120-frame 60 FPS 3D render (128 DrawIndexed/frame = 15,360 draws), buffer update & input pacing loop
     for (uint32_t frame = 0; frame < 120; ++frame) {
         WIN_MSG msg;
         zero_bytes(&msg, sizeof(msg));
@@ -424,6 +484,8 @@ void WinMainCRTStartup(void) {
         }
 
         ((PFN_OMSetRT)((COM_OBJ*)ctx)->vtbl[33])(ctx, 1, &rtv, dsv);
+        if (dss) ((PFN_OMSetDSS)((COM_OBJ*)ctx)->vtbl[36])(ctx, dss, 0u);
+        if (bs)  ((PFN_OMSetBlend)((COM_OBJ*)ctx)->vtbl[35])(ctx, bs, blend_factor, 0xFFFFFFFFu);
         ((PFN_RSSetVP)((COM_OBJ*)ctx)->vtbl[44])(ctx, 1, &vp);
         ((PFN_ClearRTV)((COM_OBJ*)ctx)->vtbl[50])(ctx, rtv, rgba);
         if (dsv) ((PFN_ClearDSV)((COM_OBJ*)ctx)->vtbl[53])(ctx, dsv, 1u, 1.0f, 0u);
@@ -438,7 +500,7 @@ void WinMainCRTStartup(void) {
             ((PFN_SetShader)((COM_OBJ*)ctx)->vtbl[9])(ctx, ps, 0, 0);
             if (srv)  ((PFN_PSSetSRV)((COM_OBJ*)ctx)->vtbl[8])(ctx, 0, 1, &srv);
             if (samp) ((PFN_PSSetSamp)((COM_OBJ*)ctx)->vtbl[10])(ctx, 0, 1, &samp);
-            for (uint32_t d = 0; d < 64; ++d) {
+            for (uint32_t d = 0; d < 128; ++d) {
                 ((PFN_DrawIndexed)((COM_OBJ*)ctx)->vtbl[12])(ctx, 18u, 0u, 0);
             }
         }
@@ -449,6 +511,8 @@ done:
     if (xa_src) ((PFN_XAVoice_Destroy)((COM_OBJ*)xa_src)->vtbl[18])(xa_src);
     if (xa_master) ((PFN_XAVoice_Destroy)((COM_OBJ*)xa_master)->vtbl[18])(xa_master);
     com_release(xa2);
+    com_release(bs);
+    com_release(dss);
     com_release(rs);
     com_release(samp);
     com_release(srv);
