@@ -584,13 +584,9 @@ inline void register_sekiro_compat_thunks(Box64Bridge& br) {
     br.register_thunk("kernel32.dll", "SleepEx", &thunk_Sleep);
     br.register_thunk("kernel32.dll", "SignalObjectAndWait", &thunk_ReturnZero);
     br.register_thunk("kernel32.dll", "TlsFree", &thunk_ReturnTrue);
-    br.register_thunk("kernel32.dll", "ExitThread", &thunk_ReturnZero);
-    br.register_thunk("kernel32.dll", "FreeLibraryAndExitThread", &thunk_ReturnZero);
     br.register_thunk("kernel32.dll", "ResumeThread", &thunk_ReturnTrue);
     br.register_thunk("kernel32.dll", "SuspendThread", &thunk_ReturnZero);
     br.register_thunk("kernel32.dll", "TerminateThread", &thunk_ReturnTrue);
-    br.register_thunk("kernel32.dll", "GetExitCodeThread", &thunk_GetExitCodeStillActive);
-    br.register_thunk("kernel32.dll", "GetExitCodeProcess", &thunk_GetExitCodeStillActive);
     br.register_thunk("kernel32.dll", "GetThreadPriority", &thunk_ReturnZero);
     br.register_thunk("kernel32.dll", "GetThreadTimes", &thunk_ReturnTrue);
     br.register_thunk("kernel32.dll", "SetProcessAffinityMask", &thunk_ReturnTrue);
@@ -655,12 +651,9 @@ inline void register_sekiro_compat_thunks(Box64Bridge& br) {
     br.register_thunk("kernel32.dll", "GetVersionExA", &thunk_GetVersionEx);
     br.register_thunk("kernel32.dll", "VerSetConditionMask", &thunk_ReturnZero);
     br.register_thunk("kernel32.dll", "VerifyVersionInfoW", &thunk_ReturnTrue);
-    br.register_thunk("kernel32.dll", "GetStartupInfoA", &thunk_GetStartupInfoW);
-    br.register_thunk("kernel32.dll", "GetEnvironmentStrings", &thunk_GetEnvironmentStringsW);
     br.register_thunk("kernel32.dll", "FreeEnvironmentStringsA", &thunk_ReturnTrue);
     br.register_thunk("kernel32.dll", "SetEnvironmentVariableW", &thunk_ReturnTrue);
     br.register_thunk("kernel32.dll", "SetEnvironmentVariableA", &thunk_ReturnTrue);
-    br.register_thunk("kernel32.dll", "ExpandEnvironmentStringsA", &thunk_ReturnZero);
     br.register_thunk("kernel32.dll", "CompareStringW", &thunk_CompareStringW);
     br.register_thunk("kernel32.dll", "LCMapStringW", &thunk_ReturnZero);
     br.register_thunk("kernel32.dll", "LCMapStringA", &thunk_ReturnZero);
@@ -742,7 +735,6 @@ inline void register_sekiro_compat_thunks(Box64Bridge& br) {
     br.register_thunk("user32.dll", "EmptyClipboard", &thunk_ReturnTrue);
     br.register_thunk("user32.dll", "GetClipboardData", &thunk_ReturnZero);
     br.register_thunk("user32.dll", "SetClipboardData", &thunk_ReturnZero);
-    br.register_thunk("user32.dll", "MessageBoxW", &thunk_ReturnTrue);
     br.register_thunk("user32.dll", "SendInput", &thunk_ReturnZero);
 
     const char* gdi_syms[] = {
@@ -764,7 +756,6 @@ inline void register_sekiro_compat_thunks(Box64Bridge& br) {
 
     // Advapi32 & Crypt32 (offline-safe entropy, username, security descriptors & cert stubs)
     br.register_thunk("advapi32.dll", "CryptGenRandom", &thunk_CryptGenRandom);
-    br.register_thunk("advapi32.dll", "SystemFunction036", &thunk_CryptGenRandom);
     br.register_thunk("advapi32.dll", "GetUserNameA", &thunk_GetUserNameA);
     br.register_thunk("advapi32.dll", "GetUserNameW", &thunk_GetUserNameW);
     br.register_thunk("advapi32.dll", "InitializeSecurityDescriptor", &thunk_ReturnTrue);

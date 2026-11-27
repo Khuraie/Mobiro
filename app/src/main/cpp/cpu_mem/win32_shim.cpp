@@ -1986,7 +1986,19 @@ void thunk_VirtualProtectEx(x64emu_t* emu) {
 }
 
 void thunk_GetExitCodeProcessOrThread(x64emu_t* emu) {
-    if (auto* out = reinterpret_cast<uint32_t*>(reg_rdx(emu))) *out = 0u;
+    auto* out = reinterpret_cast<uint32_t*>(reg_rdx(emu));
+    if (!out) {
+        reg_rax(emu) = 0ULL;
+        return;
+    }
+    const uint64_t handle = reg_rcx(emu);
+    uint32_t code = 0u;
+    auto* bridge = Box64Bridge::instance();
+    if (bridge && bridge->threads().get_exit_code(handle, &code)) {
+        *out = code;
+    } else {
+        *out = 259u; // STILL_ACTIVE for current process/thread pseudo-handles
+    }
     reg_rax(emu) = 1ULL;
 }
 

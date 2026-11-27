@@ -161,6 +161,17 @@ public:
         return ok ? 0x00000000u : 0x00000102u;
     }
 
+    bool get_exit_code(uint64_t handle, uint32_t* out_code) const {
+        if (!out_code) return false;
+        auto rec = find(handle);
+        if (!rec) return false;
+        std::lock_guard<std::mutex> lk(rec->mu);
+        *out_code = rec->finished ? rec->exit_code : 259u; // STILL_ACTIVE
+        return true;
+    }
+
+    // Non-blocking on still-running workers (matches Win32 CreateThread + CloseHandle fire-and-forget);
+    // finished workers are joined & reclaimed immediately, running ones are parked until join_all().
     bool close(uint64_t handle) {
         std::shared_ptr<ThreadRec> rec;
         {
@@ -169,6 +180,31 @@ public:
             if (it == threads_.end()) return false;
             rec = std::move(it->second);
             threads_.erase(it);
+            // Reclaim any previously closed threads that have now finished
+            for (auto cit = closed_threads_.begin(); cit != closed_threads_.end();) {
+                bool done = false;
+                {
+                    std::lock_guard<std::mutex> rlk((*cit)->mu);
+                    done = (*cit)->finished;
+                }
+                if (done) {
+                    if ((*cit)->worker.joinable()) (*cit)->worker.join();
+                    cit = closed_threads_.erase(cit);
+                } else {
+                    ++cit;
+                }
+            }
+            if (rec) {
+                bool done = false;
+                {
+                    std::lock_guard<std::mutex> rlk(rec->mu);
+                    done = rec->finished;
+                }
+                if (!done) {
+                    closed_threads_.push_back(std::move(rec));
+                    return true;
+                }
+            }
         }
         if (rec && rec->worker.joinable()) rec->worker.join();
         return true;
@@ -176,11 +212,16 @@ public:
 
     void join_all() {
         std::unordered_map<uint64_t, std::shared_ptr<ThreadRec>> copy;
+        std::vector<std::shared_ptr<ThreadRec>> closed_copy;
         {
             std::lock_guard<std::mutex> lk(mu_);
             copy.swap(threads_);
+            closed_copy.swap(closed_threads_);
         }
         for (auto& [_, rec] : copy) {
+            if (rec && rec->worker.joinable()) rec->worker.join();
+        }
+        for (auto& rec : closed_copy) {
             if (rec && rec->worker.joinable()) rec->worker.join();
         }
     }
@@ -209,6 +250,7 @@ private:
     ThreadDispatchFn dispatch_fn_;
     EnvDispatchFn env_dispatch_fn_;
     std::unordered_map<uint64_t, std::shared_ptr<ThreadRec>> threads_;
+    std::vector<std::shared_ptr<ThreadRec>> closed_threads_;
 };
 
 } // namespace mobiro::win32

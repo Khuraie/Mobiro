@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <vector>
 
 #if defined(__ANDROID__)
@@ -128,7 +129,9 @@ public:
         ring_.clear();
     }
 
+    // Multi-producer safe (XAudio2 voices + WinMM FMOD/Bink threads) while AAudio consumer stays lock-free
     size_t submit_pcm_float(const float* samples, size_t sample_count) {
+        std::lock_guard<std::mutex> lk(producer_mu_);
         return ring_.write(samples, sample_count);
     }
 
@@ -151,6 +154,7 @@ private:
     }
     AAudioStream* stream_ = nullptr;
 #endif
+    std::mutex producer_mu_;
     PcmRingBuffer ring_;
     int32_t sample_rate_ = 48000;
     int32_t channels_ = 2;

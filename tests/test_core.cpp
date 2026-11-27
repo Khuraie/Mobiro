@@ -2983,6 +2983,73 @@ void test_m30_zero_alloc_dirty_hud_and_opacity() {
     assert(ov.last_revision() == 0);
 }
 
+void test_m33_nonblocking_thread_close_mpsc_audio_and_thunk_integrity() {
+    // 1. GuestThreadTable: CloseHandle on running thread must NOT deadlock, and get_exit_code reports STILL_ACTIVE -> code
+    mobiro::mem::GuestArena arena;
+    assert(arena.reserve(0x0000000100000000ULL, 16ULL * 1024 * 1024));
+    mobiro::win32::GuestThreadTable threads;
+    std::atomic<bool> gate{false};
+    threads.set_dispatch_callback([&](uintptr_t, uintptr_t, mobiro::cpu::Win64Teb*) -> uint32_t {
+        while (!gate.load(std::memory_order_acquire)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        return 0x42u;
+    });
+
+    uint32_t tid1 = 0, tid2 = 0;
+    const uint64_t h1 = threads.create_thread(&arena, 0x140000000ULL, 0x140001000ULL, 0, &tid1);
+    const uint64_t h2 = threads.create_thread(&arena, 0x140000000ULL, 0x140001000ULL, 0, &tid2);
+    assert(h1 != 0 && h2 != 0);
+
+    uint32_t code = 0;
+    assert(threads.get_exit_code(h1, &code) && code == 259u); // STILL_ACTIVE while running
+
+    // CloseHandle on still-running h2 MUST return immediately without blocking on gate!
+    const auto t0 = std::chrono::steady_clock::now();
+    assert(threads.close(h2));
+    const auto close_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t0).count();
+    assert(close_ms < 200);
+
+    gate.store(true, std::memory_order_release);
+    assert(threads.wait_single(h1, 2000) == 0);
+    assert(threads.get_exit_code(h1, &code) && code == 0x42u);
+    assert(threads.close(h1));
+    threads.join_all();
+
+    // 2. AAudioXAudioBridge: 4 concurrent producers must not corrupt sample count
+    mobiro::audio::AAudioXAudioBridge audio;
+    audio.start(48000, 2);
+    std::vector<std::thread> prods;
+    for (int t = 0; t < 4; ++t) {
+        prods.emplace_back([&, t]() {
+            float chunk[64];
+            for (int i = 0; i < 64; ++i) chunk[i] = static_cast<float>(t + 1);
+            for (int k = 0; k < 20; ++k) audio.submit_pcm_float(chunk, 64);
+        });
+    }
+    for (auto& th : prods) th.join();
+    std::vector<float> drained(4 * 20 * 64, 0.0f);
+    assert(audio.drain_pcm_float(drained.data(), drained.size()) == drained.size());
+    audio.stop();
+
+    // 3. Thunk integrity: advapi32!SystemFunction036 (RtlGenRandom 2-arg) must not crash or be overwritten by 3-arg CryptGenRandom
+    mobiro::validator::VfsMapper vfs;
+    mobiro::cpu::Box64Bridge br;
+    assert(br.initialize(&arena, &vfs));
+    uint8_t rnd[32] = {};
+    x64emu_t emu{};
+    emu.rcx = reinterpret_cast<uint64_t>(rnd);
+    emu.rdx = sizeof(rnd);
+    emu.r8  = 0xDEADBEEFULL; // Uninitialized 3rd arg; 3-arg CryptGenRandom would have segfaulted writing here!
+    assert(br.invoke_thunk("advapi32.dll", "SystemFunction036", &emu));
+    assert(emu.rax == 1ULL);
+    bool nonzero = false;
+    for (uint8_t b : rnd) if (b != 0) nonzero = true;
+    assert(nonzero);
+    br.shutdown();
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -3082,6 +3149,7 @@ int main(int argc, char** argv) {
     test_m28_d3d11_create_shader_state_wrap_and_gs_unwrap();
     test_m29_dxgi_get_parent_adapter_min_lod_and_yield();
     test_m30_zero_alloc_dirty_hud_and_opacity();
+    test_m33_nonblocking_thread_close_mpsc_audio_and_thunk_integrity();
     std::cout << "All Mobiro core unit tests passed.\n";
     return 0;
 }

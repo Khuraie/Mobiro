@@ -6,6 +6,16 @@
 
 ## Log Entries
 
+### Increment 32 — M33: Non-Blocking `CloseHandle(hThread)`, MPSC Audio Safety & Elimination of 8 Destructive Win32 Thunk Overwrites (2026-11-27)
+- **Status:** Implemented & verified (local MSVC 2022 tests `31/31` + retail `--verify-byof` + GitHub Actions CI + bundled ARM64 APK)
+- **Changes:**
+  - Fixed a classic Win32 worker-thread deadlock in `GuestThreadTable::close()` (`app/src/main/cpp/cpu_mem/win32_thread_wait.hpp`): `CloseHandle(hThread)` on a still-running worker thread now parks it in `closed_threads_` (joined cleanly at `join_all()` on shutdown) instead of blocking the caller forever, while immediately reclaiming finished threads; added accurate `get_exit_code()` (`STILL_ACTIVE` → real exit code) wired into `thunk_GetExitCodeProcessOrThread` (`win32_shim.cpp`).
+  - Made `AAudioXAudioBridge::submit_pcm_float()` (`app/src/main/cpp/audio/aaudio_xaudio_bridge.hpp`) multi-producer thread-safe (`producer_mu_`) for concurrent XAudio2 voices + WinMM FMOD/Bink2 threads while keeping the real-time `aaudio_data_callback` consumer 100% lock-free.
+  - Audited all duplicate `register_thunk` registrations between `win32_shim.cpp` and `win32_sekiro_compat.hpp` and removed 8 silent overwrites in `win32_sekiro_compat.hpp` (including `advapi32!SystemFunction036` 2-arg `RtlGenRandom` being overwritten by 3-arg `CryptGenRandom`, plus `ExitThread`, `FreeLibraryAndExitThread`, `GetExitCodeThread`, `GetStartupInfoA`, `GetEnvironmentStrings`, `ExpandEnvironmentStringsA`, and `MessageBoxW`).
+  - Added `test_m33_nonblocking_thread_close_mpsc_audio_and_thunk_integrity` in `tests/test_core.cpp` (31/31 suites passing).
+
+---
+
 ### Increment 31 — M29–M32: Full DXGI Parent/Device COM Chain, Zero-Alloc Dirty HUD Present, Persisted Runtime Settings UI & Multi-Threaded 15,360-Draw 3D Self-Test (2026-11-27)
 - **Status:** Implemented & verified (local MSVC 2022 tests `30/30` + retail `--verify-byof` + GitHub Actions CI + MinGW PE64 `--verify-pe` + bundled ARM64 APK)
 - **Changes:**
