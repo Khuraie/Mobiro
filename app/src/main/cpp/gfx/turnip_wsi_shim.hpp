@@ -166,6 +166,11 @@ private:
         return UINT32_MAX;
     }
 
+    static VkResult VKAPI_CALL shim_vkEnumerateInstanceVersion(uint32_t* pApiVersion) {
+        if (pApiVersion) *pApiVersion = VK_API_VERSION_1_3;
+        return VK_SUCCESS;
+    }
+
     static VkResult VKAPI_CALL shim_vkEnumerateInstanceLayerProperties(
         uint32_t* pCount, VkLayerProperties* /*pProps*/) {
         if (pCount) *pCount = 0;
@@ -794,7 +799,11 @@ private:
 
         auto& self = global();
         if (!self.drv_.get_instance_proc_addr) return nullptr;
-        return reinterpret_cast<PFN_vkVoidFunction>(self.drv_.get_instance_proc_addr(inst, name));
+        auto fn = reinterpret_cast<PFN_vkVoidFunction>(self.drv_.get_instance_proc_addr(inst, name));
+        if (!fn && std::strcmp(name, "vkEnumerateInstanceVersion") == 0) {
+            return reinterpret_cast<PFN_vkVoidFunction>(&shim_vkEnumerateInstanceVersion);
+        }
+        return fn;
     }
 
     std::unordered_map<VkInstance, InstanceRec> instances_;

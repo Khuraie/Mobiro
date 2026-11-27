@@ -92,8 +92,14 @@ namespace dxvk {
 
     destroyResources();
 
+    auto resolveMobiro = [](const char* sym) -> void* {
+      if (void* s = dlsym(RTLD_DEFAULT, sym))
+        return s;
+      static void* h = dlopen("libsekiro_runtime.so", RTLD_NOW | RTLD_NOLOAD);
+      return h ? dlsym(h, sym) : nullptr;
+    };
     static auto pfnGetSpec = reinterpret_cast<PfnGetSpec>(
-      dlsym(RTLD_DEFAULT, "mobiro_touch_overlay_pipeline_spec"));
+      resolveMobiro("mobiro_touch_overlay_pipeline_spec"));
     if (!pfnGetSpec) {
       m_unavailable = true;
       return false;
@@ -284,8 +290,12 @@ namespace dxvk {
     if (!ensureResources(device, dstView->info().format))
       return;
 
-    static auto pfnCopy = reinterpret_cast<PfnCopyVertices>(
-      dlsym(RTLD_DEFAULT, "mobiro_touch_overlay_copy_vertices"));
+    static auto pfnCopy = []() -> PfnCopyVertices {
+      if (void* s = dlsym(RTLD_DEFAULT, "mobiro_touch_overlay_copy_vertices"))
+        return reinterpret_cast<PfnCopyVertices>(s);
+      void* h = dlopen("libsekiro_runtime.so", RTLD_NOW | RTLD_NOLOAD);
+      return h ? reinterpret_cast<PfnCopyVertices>(dlsym(h, "mobiro_touch_overlay_copy_vertices")) : nullptr;
+    }();
     if (!pfnCopy)
       return;
 

@@ -15,12 +15,19 @@ namespace dxvk::wsi {
 
   static constexpr uint32_t AndroidMonitorId = 1;
 
+  static void* resolveMobiroSym(const char* name) {
+    if (void* s = dlsym(RTLD_DEFAULT, name))
+      return s;
+    static void* h = dlopen("libsekiro_runtime.so", RTLD_NOW | RTLD_NOLOAD);
+    return h ? dlsym(h, name) : nullptr;
+  }
+
   // Resolves the live ANativeWindow* exported by libsekiro_runtime.so first so swapchain
   // creation stays valid across Android pause/resume, falling back to hWindow as ANativeWindow*.
   static ANativeWindow* resolveAndroidWindow(HWND hWindow) {
     using PfnGetWin = void* (*)();
     static auto pfn = reinterpret_cast<PfnGetWin>(
-        dlsym(RTLD_DEFAULT, "mobiro_get_android_native_window"));
+        resolveMobiroSym("mobiro_get_android_native_window"));
     if (pfn) {
       if (auto* w = static_cast<ANativeWindow*>(pfn()))
         return w;
