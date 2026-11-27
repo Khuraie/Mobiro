@@ -2796,6 +2796,89 @@ void test_m27_turnip_wsi_scaled_extent() {
     shim.set_max_render_height(orig);
 }
 
+void test_m28_d3d11_create_shader_state_wrap_and_gs_unwrap() {
+    struct FakeObj { void** vtbl; uint32_t tag; };
+    static FakeObj g_out_hs{nullptr, 0x16}, g_out_cs{nullptr, 0x18}, g_out_rs{nullptr, 0x22}, g_out_cl{nullptr, 0x114};
+    static void* g_last_srv = nullptr;
+    static void* g_last_rs  = nullptr;
+
+    static void* dev_vtbl[43] = {};
+    dev_vtbl[2] = reinterpret_cast<void*>(+[](void*) -> uint64_t { return 0; });
+    dev_vtbl[16] = reinterpret_cast<void*>(+[](void*, void*, uint64_t, void*, void** out) -> uint64_t {
+        *out = &g_out_hs; return 0; // CreateHullShader
+    });
+    dev_vtbl[18] = reinterpret_cast<void*>(+[](void*, void*, uint64_t, void*, void** out) -> uint64_t {
+        *out = &g_out_cs; return 0; // CreateComputeShader
+    });
+    dev_vtbl[22] = reinterpret_cast<void*>(+[](void*, const void*, void** out) -> uint64_t {
+        *out = &g_out_rs; return 0; // CreateRasterizerState
+    });
+
+    static void* ctx_vtbl[115] = {};
+    ctx_vtbl[2] = reinterpret_cast<void*>(+[](void*) -> uint64_t { return 0; });
+    ctx_vtbl[31] = reinterpret_cast<void*>(+[](void*, uint64_t, uint64_t, void** srvs) -> uint64_t {
+        g_last_srv = srvs ? srvs[0] : nullptr; return 0; // GSSetShaderResources
+    });
+    ctx_vtbl[43] = reinterpret_cast<void*>(+[](void*, void* rs) -> uint64_t {
+        g_last_rs = rs; return 0; // RSSetState
+    });
+    ctx_vtbl[114] = reinterpret_cast<void*>(+[](void*, uint64_t, void** out) -> uint64_t {
+        *out = &g_out_cl; return 0; // FinishCommandList
+    });
+
+    FakeObj native_dev{dev_vtbl, 1}, native_ctx{ctx_vtbl, 2}, native_srv{dev_vtbl, 3};
+    auto& br = mobiro::gfx::D3D11ComBridge::global();
+    void* dev_p = br.wrap(&native_dev, mobiro::gfx::d3d11_abi::ComIfaceId::D3D11Device);
+    void* ctx_p = br.wrap(&native_ctx, mobiro::gfx::d3d11_abi::ComIfaceId::D3D11DeviceContext);
+    void* srv_p = br.wrap(&native_srv, mobiro::gfx::d3d11_abi::ComIfaceId::D3D11ResourceChild);
+
+    uint64_t stack[12] = {};
+    x64emu_t emu{};
+    emu.rsp = reinterpret_cast<uint64_t>(stack);
+
+    // Regression check: slots 16 (CreateHullShader), 18 (CreateComputeShader), 22 (CreateRasterizerState)
+    // previously collided with D3D11DeviceContext array slots and returned raw native pointers!
+    void *hs_p = nullptr, *cs_p = nullptr, *rs_p = nullptr, *cl_p = nullptr;
+    emu.rcx = reinterpret_cast<uint64_t>(dev_p);
+    stack[5] = reinterpret_cast<uint64_t>(&hs_p);
+    mobiro::gfx::D3D11ComBridge::dispatch_slot<16>(&emu);
+    assert(hs_p && br.find_proxy(reinterpret_cast<uintptr_t>(hs_p)) != nullptr);
+    assert(br.unwrap_arg(reinterpret_cast<uint64_t>(hs_p)) == reinterpret_cast<uint64_t>(&g_out_hs));
+
+    stack[5] = reinterpret_cast<uint64_t>(&cs_p);
+    mobiro::gfx::D3D11ComBridge::dispatch_slot<18>(&emu);
+    assert(cs_p && br.find_proxy(reinterpret_cast<uintptr_t>(cs_p)) != nullptr);
+
+    emu.r8 = reinterpret_cast<uint64_t>(&rs_p);
+    mobiro::gfx::D3D11ComBridge::dispatch_slot<22>(&emu);
+    assert(rs_p && br.find_proxy(reinterpret_cast<uintptr_t>(rs_p)) != nullptr);
+
+    // RSSetState (slot 43 fast path) must unwrap rs_p back to &g_out_rs
+    g_last_rs = nullptr;
+    emu.rcx = reinterpret_cast<uint64_t>(ctx_p);
+    emu.rdx = reinterpret_cast<uint64_t>(rs_p);
+    mobiro::gfx::D3D11ComBridge::dispatch_slot<43>(&emu);
+    assert(g_last_rs == &g_out_rs);
+
+    // GSSetShaderResources (slot 31) must unwrap proxy array
+    void* srv_arr[1] = {srv_p};
+    g_last_srv = nullptr;
+    emu.rdx = 0; emu.r8 = 1; emu.r9 = reinterpret_cast<uint64_t>(srv_arr);
+    mobiro::gfx::D3D11ComBridge::dispatch_slot<31>(&emu);
+    assert(g_last_srv == &native_srv);
+
+    // FinishCommandList (slot 114) must wrap returned command list
+    emu.rdx = 0; emu.r8 = reinterpret_cast<uint64_t>(&cl_p);
+    mobiro::gfx::D3D11ComBridge::dispatch_slot<114>(&emu);
+    assert(cl_p && br.find_proxy(reinterpret_cast<uintptr_t>(cl_p)) != nullptr);
+
+    // Clean up proxies
+    for (void* p : {cl_p, rs_p, cs_p, hs_p, srv_p, ctx_p, dev_p}) {
+        emu.rcx = reinterpret_cast<uint64_t>(p);
+        mobiro::gfx::D3D11ComBridge::dispatch_slot<2>(&emu);
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -2892,6 +2975,7 @@ int main(int argc, char** argv) {
     test_m25_lockfree_present_raw_hook();
     test_m26_turnip_wsi_extension_filter();
     test_m27_turnip_wsi_scaled_extent();
+    test_m28_d3d11_create_shader_state_wrap_and_gs_unwrap();
     std::cout << "All Mobiro core unit tests passed.\n";
     return 0;
 }

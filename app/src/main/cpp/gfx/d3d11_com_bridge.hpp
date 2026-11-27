@@ -213,9 +213,8 @@ public:
         uint64_t a3 = self.unwrap_arg(r9);
 
         // Fast path for 1..4-arg hot slots: skips 6 stack loads + unwrap checks.
-        // Slot 1/2 (IUnknown::AddRef/Release) apply to all COM interfaces; slots 12/13/15/24/44/45/50
-        // (DrawIndexed, Draw, Unmap, IASetPrimitiveTopology, RSSetViewports/ScissorRects, ClearRTV)
-        // are strictly gated to D3D11DeviceContext so D3D11Device::Create*Shader/CreateQuery & ResizeBuffers keep full dispatch.
+        // Slot 1/2 (IUnknown::AddRef/Release) apply to all COM interfaces; hot D3D11DeviceContext
+        // draw/state slots are strictly gated to D3D11DeviceContext so D3D11Device::Create* & ResizeBuffers keep full dispatch.
         if constexpr (Slot == 1 || Slot == 2) {
             using FastFn = uint64_t (*)(void*);
             auto fn = reinterpret_cast<FastFn>(native_vtbl[Slot]);
@@ -227,8 +226,9 @@ public:
                 }
             }
             return;
-        } else if constexpr (Slot == 12 || Slot == 13 || Slot == 15 || Slot == 24 ||
-                             Slot == 44 || Slot == 45 || Slot == 50) {
+        } else if constexpr (Slot == 12 || Slot == 13 || Slot == 15 || Slot == 17 ||
+                             Slot == 19 || Slot == 24 || Slot == 36 || Slot == 41 ||
+                             Slot == 43 || Slot == 44 || Slot == 45 || Slot == 47 || Slot == 50) {
             if (proxy->iface == d3d11_abi::ComIfaceId::D3D11DeviceContext) {
                 using FastFn = uint64_t (*)(void*, uint64_t, uint64_t, uint64_t);
                 auto fn = reinterpret_cast<FastFn>(native_vtbl[Slot]);
@@ -244,17 +244,25 @@ public:
         uint64_t a8 = sp ? self.unwrap_arg(sp[9]) : 0;
         uint64_t a9 = sp ? self.unwrap_arg(sp[10]) : 0;
 
-        // Zero-heap stack unwrapping for ID3D11DeviceContext methods taking arrays of COM pointers
-        // (allocated only on array-bearing slots to avoid 384B memset overhead on every draw call).
-        if constexpr (Slot == 7 || Slot == 8 || Slot == 10 || Slot == 16 || Slot == 18 ||
-                      Slot == 22 || Slot == 25 || Slot == 26 || Slot == 33 || Slot == 34 ||
-                      Slot == 37 || Slot == 59 || Slot == 61 || Slot == 62 || Slot == 63 ||
-                      Slot == 65 || Slot == 66 || Slot == 67 || Slot == 68 || Slot == 70 ||
-                      Slot == 71) {
-            uint64_t tmp_arr0[32];
-            uint64_t tmp_arr1[16];
+        // Zero-heap stack unwrapping for ID3D11DeviceContext methods taking arrays of COM pointers.
+        // Returns ONLY for D3D11DeviceContext so D3D11Device::Create* (e.g. slots 16/18/22/25/26)
+        // and DXGI methods always fall through to the unified out-parameter wrapper below.
+        if constexpr (Slot == 7 || Slot == 8 || Slot == 9 || Slot == 10 || Slot == 11 ||
+                      Slot == 16 || Slot == 18 || Slot == 22 || Slot == 23 || Slot == 25 ||
+                      Slot == 26 || Slot == 31 || Slot == 32 || Slot == 33 || Slot == 34 ||
+                      Slot == 37 || Slot == 59 || Slot == 60 || Slot == 61 || Slot == 62 ||
+                      Slot == 63 || Slot == 64 || Slot == 65 || Slot == 66 || Slot == 67 ||
+                      Slot == 68 || Slot == 69 || Slot == 70 || Slot == 71) {
             if (proxy->iface == d3d11_abi::ComIfaceId::D3D11DeviceContext) {
-                if constexpr (Slot == 33 || Slot == 37) {
+                uint64_t tmp_arr0[32];
+                uint64_t tmp_arr1[16];
+                if constexpr (Slot == 9 || Slot == 11 || Slot == 23 ||
+                              Slot == 60 || Slot == 64 || Slot == 69) {
+                    // *SetShader(pShader, ppClassInstances, NumClassInstances)
+                    if (a2 && a3 > 0) {
+                        a2 = self.unwrap_proxy_array(a2, static_cast<uint32_t>(a3), tmp_arr0, 32);
+                    }
+                } else if constexpr (Slot == 33 || Slot == 37) {
                     // OMSetRenderTargets(NumViews, ppRTVs, pDSV) / SOSetTargets(NumBuffers, ppSOTargets, pOffsets)
                     a2 = self.unwrap_proxy_array(a2, static_cast<uint32_t>(a1), tmp_arr0, 32);
                 } else if constexpr (Slot == 34) {
@@ -265,29 +273,12 @@ public:
                     // (this, StartSlot, NumItems, T* const* ppItems, ...)
                     a3 = self.unwrap_proxy_array(a3, static_cast<uint32_t>(a2), tmp_arr0, 32);
                 }
+                using NativeFn = uint64_t (*)(void*, uint64_t, uint64_t, uint64_t, uint64_t,
+                                              uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+                auto fn = reinterpret_cast<NativeFn>(native_vtbl[Slot]);
+                rax = fn(proxy->native_obj, a1, a2, a3, a4, a5, a6, a7, a8, a9);
+                return;
             }
-            using NativeFn = uint64_t (*)(void*, uint64_t, uint64_t, uint64_t, uint64_t,
-                                          uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-            auto fn = reinterpret_cast<NativeFn>(native_vtbl[Slot]);
-            const uint64_t ret = fn(proxy->native_obj, a1, a2, a3, a4, a5, a6, a7, a8, a9);
-            rax = ret;
-            if constexpr (Slot == 7 || Slot == 8 || Slot == 10) {
-                const bool hr_ok = (static_cast<int32_t>(ret) >= 0);
-                if (proxy->iface == d3d11_abi::ComIfaceId::D3D11Device && hr_ok) {
-                    self.wrap_out_ptr(r9, d3d11_abi::ComIfaceId::D3D11ResourceChild);
-                } else if constexpr (Slot == 7) {
-                    if (proxy->iface == d3d11_abi::ComIfaceId::DXGIFactory1 && hr_ok) {
-                        self.wrap_out_ptr(r8, d3d11_abi::ComIfaceId::DXGIAdapter1);
-                    } else if (proxy->iface == d3d11_abi::ComIfaceId::DXGIAdapter1 && hr_ok) {
-                        self.wrap_out_ptr(r8, d3d11_abi::ComIfaceId::DXGIOutput);
-                    }
-                } else if constexpr (Slot == 10) {
-                    if (proxy->iface == d3d11_abi::ComIfaceId::DXGIFactory1 && hr_ok) {
-                        self.wrap_out_ptr(r9, d3d11_abi::ComIfaceId::DXGISwapChain);
-                    }
-                }
-            }
-            return;
         }
 
         // Forward up to 10 pointer/integer arguments to native AAPCS64/host COM method.
@@ -339,21 +330,37 @@ public:
             } else if (proxy->iface == d3d11_abi::ComIfaceId::D3D11Device && hr_ok && sp) {
                 self.wrap_out_ptr(sp[5], d3d11_abi::ComIfaceId::D3D11ResourceChild); // CreateVertexShader (arg4)
             }
+        } else if constexpr (Slot == 14) {
+            if (proxy->iface == d3d11_abi::ComIfaceId::D3D11Device && hr_ok && sp) {
+                self.wrap_out_ptr(sp[10], d3d11_abi::ComIfaceId::D3D11ResourceChild); // CreateGeometryShaderWithStreamOutput (arg9)
+            }
         } else if constexpr (Slot == 13 || Slot == 15 || Slot == 16 || Slot == 17 || Slot == 18) {
             if (proxy->iface == d3d11_abi::ComIfaceId::D3D11Device && hr_ok && sp) {
                 self.wrap_out_ptr(sp[5], d3d11_abi::ComIfaceId::D3D11ResourceChild); // Create*Shader (arg4)
             }
-        } else if constexpr (Slot >= 20 && Slot <= 24) {
+        } else if constexpr (Slot == 19) {
             if (proxy->iface == d3d11_abi::ComIfaceId::D3D11Device && hr_ok) {
-                self.wrap_out_ptr(r8, d3d11_abi::ComIfaceId::D3D11ResourceChild); // Create*State / CreateQuery
+                self.wrap_out_ptr(rdx, d3d11_abi::ComIfaceId::D3D11ResourceChild); // CreateClassLinkage (arg1)
+            }
+        } else if constexpr (Slot >= 20 && Slot <= 26) {
+            if (proxy->iface == d3d11_abi::ComIfaceId::D3D11Device && hr_ok) {
+                self.wrap_out_ptr(r8, d3d11_abi::ComIfaceId::D3D11ResourceChild); // Create*State / Query / Predicate / Counter
             }
         } else if constexpr (Slot == 27) {
             if (proxy->iface == d3d11_abi::ComIfaceId::D3D11Device && hr_ok) {
                 self.wrap_out_ptr(r8, d3d11_abi::ComIfaceId::D3D11DeviceContext); // CreateDeferredContext
             }
+        } else if constexpr (Slot == 28) {
+            if (proxy->iface == d3d11_abi::ComIfaceId::D3D11Device && hr_ok) {
+                self.wrap_out_ptr(r9, d3d11_abi::ComIfaceId::D3D11ResourceChild); // OpenSharedResource
+            }
         } else if constexpr (Slot == 40) {
             if (proxy->iface == d3d11_abi::ComIfaceId::D3D11Device) {
                 self.wrap_out_ptr(rdx, d3d11_abi::ComIfaceId::D3D11DeviceContext); // GetImmediateContext (void)
+            }
+        } else if constexpr (Slot == 114) {
+            if (proxy->iface == d3d11_abi::ComIfaceId::D3D11DeviceContext && hr_ok) {
+                self.wrap_out_ptr(r8, d3d11_abi::ComIfaceId::D3D11ResourceChild); // FinishCommandList
             }
         }
 

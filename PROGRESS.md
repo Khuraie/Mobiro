@@ -6,6 +6,15 @@
 
 ## Log Entries
 
+### Increment 30 — M28: Fix Critical D3D11 `Create*` Slot-Collision COM Wrapping Bugs & Upgrade Clean-Room Self-Test to Real 3D DXBC Textured/Depth Pipeline (2026-11-27)
+- **Status:** Implemented & verified (local MSVC 2022 tests + retail `--verify-byof` + GitHub Actions CI + MinGW PE64 + bundled ARM64 APK)
+- **Changes:**
+  - Caught and fixed a critical real-3D rendering bug in `D3D11ComBridge::dispatch_slot` (`app/src/main/cpp/gfx/d3d11_com_bridge.hpp`): the early return in the `D3D11DeviceContext` array-unwrap branch previously intercepted `ID3D11Device::CreateHullShader` (slot 16), `CreateComputeShader` (slot 18), `CreateRasterizerState` (slot 22), `CreatePredicate` (slot 25), and `CreateCounter` (slot 26) before out-parameter proxy wrapping (which would have returned raw native ARM64 DXVK pointers to Win64 guest code). Restricted the array-unwrap early return strictly to `ComIfaceId::D3D11DeviceContext`, added missing `CreateGeometryShaderWithStreamOutput` (14), `CreateClassLinkage` (19), `OpenSharedResource` (28), `FinishCommandList` (114), `GSSetShaderResources`/`Samplers` (31/32), and `*SetShader` class-instance array unwrapping, and extended the 1–4-arg hot fast-path to `IASetInputLayout`, `IASetIndexBuffer`, `OMSetDepthStencilState`, `Dispatch`, `RSSetState`, and `CopyResource`.
+  - Upgraded clean-room `tools/mobiro_selftest.c` + `tools/selftest_shaders_dxbc.h` with genuine SM 4.0 DXBC Vertex (`vs_4_0`) & Pixel (`ps_4_0`) shaders, `ID3D11InputLayout`, 3D rotating pyramid VB/IB, `D24_UNORM_S8_UINT` depth buffer (`ClearDepthStencilView` via `XMM3`), 64×64 procedural checkerboard `Texture2D`/SRV + linear Sampler, `CreateRasterizerState`/`RSSetState`/`RSSetViewports`, and **64 `DrawIndexed(18, 0, 0)` calls/frame** (7,680 draws across 120 frames at 60 FPS).
+  - Added regression test `test_m28_d3d11_create_shader_state_wrap_and_gs_unwrap` in `tests/test_core.cpp` (28/28 suites passing).
+
+---
+
 ### Increment 29 — M27: Async Double-Buffered Turnip WSI Present Pipeline, 900p Hardware-Scaled Swapchain Cap & Boot-Log Frame Pacing Telemetry (2026-11-27)
 - **Status:** Implemented & verified (local MSVC 2022 tests + retail `--verify-byof` + GitHub Actions CI + bundled ARM64 APK)
 - **Changes:**
