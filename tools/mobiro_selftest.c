@@ -69,12 +69,63 @@ DLLIMP uint32_t WINAPI waveOutGetNumDevs(void);
 typedef uint32_t (WINAPI *PFN_XInputGetState)(uint32_t idx, XINPUT_STATE* st);
 typedef int32_t  (WINAPI *PFN_XAudio2Create)(void** pp_xa2, uint32_t flags, uint32_t proc);
 
+typedef struct {
+    uint32_t byte_width;
+    uint32_t usage;
+    uint32_t bind_flags;
+    uint32_t cpu_access;
+    uint32_t misc_flags;
+    uint32_t stride;
+} D3D11_BUFFER_DESC;
+
+typedef struct {
+    void* data;
+    uint32_t row_pitch;
+    uint32_t depth_pitch;
+} D3D11_MAPPED_SUBRESOURCE;
+
+#pragma pack(push, 1)
+typedef struct {
+    uint16_t format_tag;
+    uint16_t channels;
+    uint32_t samples_per_sec;
+    uint32_t avg_bytes_per_sec;
+    uint16_t block_align;
+    uint16_t bits_per_sample;
+    uint16_t cb_size;
+} WAVEFORMATEX;
+#pragma pack(pop)
+
+typedef struct {
+    uint32_t flags;
+    uint32_t audio_bytes;
+    const uint8_t* audio_data;
+    uint32_t play_begin;
+    uint32_t play_length;
+    uint32_t loop_begin;
+    uint32_t loop_length;
+    uint32_t loop_count;
+    void* context;
+} XAUDIO2_BUFFER;
+
 typedef uint32_t (WINAPI *PFN_Release)(void* self);
 typedef int32_t  (WINAPI *PFN_Present)(void* self, uint32_t sync, uint32_t flags);
 typedef int32_t  (WINAPI *PFN_GetBuffer)(void* self, uint32_t idx, const GUID* riid, void** pp_surf);
+typedef int32_t  (WINAPI *PFN_CreateBuffer)(void* self, const D3D11_BUFFER_DESC* desc, const void* init, void** pp_buf);
 typedef int32_t  (WINAPI *PFN_CreateRTV)(void* self, void* res, const void* desc, void** pp_rtv);
+typedef void     (WINAPI *PFN_VSSetCB)(void* self, uint32_t start, uint32_t n, void* const* cbs);
+typedef int32_t  (WINAPI *PFN_Map)(void* self, void* res, uint32_t sub, uint32_t type, uint32_t flags, D3D11_MAPPED_SUBRESOURCE* out);
+typedef void     (WINAPI *PFN_Unmap)(void* self, void* res, uint32_t sub);
 typedef void     (WINAPI *PFN_OMSetRT)(void* self, uint32_t n, void* const* rtvs, void* dsv);
 typedef void     (WINAPI *PFN_ClearRTV)(void* self, void* rtv, const float rgba[4]);
+
+typedef int32_t  (WINAPI *PFN_XA27_Init)(void* self, uint32_t flags, uint32_t proc);
+typedef int32_t  (WINAPI *PFN_XA27_CreateMaster)(void* self, void** pp, uint32_t ch, uint32_t rate, uint32_t flags, uint32_t dev_idx, const void* fx);
+typedef int32_t  (WINAPI *PFN_XA27_CreateSource)(void* self, void** pp, const WAVEFORMATEX* fmt, uint32_t flags, float max_ratio, void* cb, const void* send, const void* fx);
+typedef int32_t  (WINAPI *PFN_XAVoice_SetVol)(void* self, float vol, uint32_t op_set);
+typedef void     (WINAPI *PFN_XAVoice_Destroy)(void* self);
+typedef int32_t  (WINAPI *PFN_XASrc_Start)(void* self, uint32_t flags, uint32_t op_set);
+typedef int32_t  (WINAPI *PFN_XASrc_Submit)(void* self, const XAUDIO2_BUFFER* buf, const void* wma);
 
 static void zero_bytes(void* p, uint32_t n) {
     uint8_t* b = (uint8_t*)p;
@@ -115,12 +166,40 @@ void WinMainCRTStartup(void) {
     void* mod_xi = LoadLibraryA("xinput1_3.dll");
     if (mod_xi) pfn_xinput = (PFN_XInputGetState)GetProcAddress(mod_xi, "XInputGetState");
 
+    void* xa2 = 0;
+    void* xa_master = 0;
+    void* xa_src = 0;
+    static int16_t pcm_chirp[2400 * 2]; // 50 ms stereo 48 kHz soft triangle wave
     void* mod_xa = LoadLibraryA("xaudio2_7.dll");
     if (mod_xa) {
         PFN_XAudio2Create pfn_xa = (PFN_XAudio2Create)GetProcAddress(mod_xa, "XAudio2Create");
-        void* xa2 = 0;
         if (pfn_xa && pfn_xa(&xa2, 0, 1) == 0 && xa2) {
-            com_release(xa2);
+            ((PFN_XA27_Init)((COM_OBJ*)xa2)->vtbl[5])(xa2, 0, 1);
+            if (((PFN_XA27_CreateMaster)((COM_OBJ*)xa2)->vtbl[10])(xa2, &xa_master, 2, 48000, 0, 0, 0) == 0 && xa_master) {
+                WAVEFORMATEX wfx;
+                zero_bytes(&wfx, sizeof(wfx));
+                wfx.format_tag = 1;
+                wfx.channels = 2;
+                wfx.samples_per_sec = 48000;
+                wfx.bits_per_sample = 16;
+                wfx.block_align = 4;
+                wfx.avg_bytes_per_sec = 192000;
+                if (((PFN_XA27_CreateSource)((COM_OBJ*)xa2)->vtbl[8])(xa2, &xa_src, &wfx, 0, 2.0f, 0, 0, 0) == 0 && xa_src) {
+                    for (uint32_t i = 0; i < 2400; ++i) {
+                        int32_t p = (int32_t)(i % 109);
+                        int16_t s = (int16_t)((p < 54 ? p : (108 - p)) * 60 - 1620);
+                        pcm_chirp[i * 2] = s;
+                        pcm_chirp[i * 2 + 1] = s;
+                    }
+                    ((PFN_XAVoice_SetVol)((COM_OBJ*)xa_src)->vtbl[12])(xa_src, 0.25f, 0);
+                    XAUDIO2_BUFFER xab;
+                    zero_bytes(&xab, sizeof(xab));
+                    xab.audio_bytes = sizeof(pcm_chirp);
+                    xab.audio_data = (const uint8_t*)pcm_chirp;
+                    ((PFN_XASrc_Submit)((COM_OBJ*)xa_src)->vtbl[21])(xa_src, &xab, 0);
+                    ((PFN_XASrc_Start)((COM_OBJ*)xa_src)->vtbl[19])(xa_src, 0, 0);
+                }
+            }
         }
     }
 
@@ -161,7 +240,17 @@ void WinMainCRTStartup(void) {
         ExitProcess(3);
     }
 
-    // 120-frame 60 FPS render & input pacing loop
+    // Dynamic constant buffer to exercise CreateBuffer + Map/Unmap + VSSetConstantBuffers per frame
+    D3D11_BUFFER_DESC cb_desc;
+    zero_bytes(&cb_desc, sizeof(cb_desc));
+    cb_desc.byte_width = 64;
+    cb_desc.usage = 2;          // D3D11_USAGE_DYNAMIC
+    cb_desc.bind_flags = 4;     // D3D11_BIND_CONSTANT_BUFFER
+    cb_desc.cpu_access = 0x10000u; // D3D11_CPU_ACCESS_WRITE
+    void* cb = 0;
+    ((PFN_CreateBuffer)((COM_OBJ*)dev)->vtbl[3])(dev, &cb_desc, 0, &cb);
+
+    // 120-frame 60 FPS render, buffer update & input pacing loop
     for (uint32_t frame = 0; frame < 120; ++frame) {
         WIN_MSG msg;
         zero_bytes(&msg, sizeof(msg));
@@ -180,12 +269,27 @@ void WinMainCRTStartup(void) {
         rgba[2] = 0.45f;
         rgba[3] = 1.0f;
 
+        if (cb) {
+            D3D11_MAPPED_SUBRESOURCE mapped;
+            zero_bytes(&mapped, sizeof(mapped));
+            if (((PFN_Map)((COM_OBJ*)ctx)->vtbl[14])(ctx, cb, 0, 4, 0, &mapped) == 0 && mapped.data) {
+                float* dst = (float*)mapped.data;
+                dst[0] = rgba[0]; dst[1] = rgba[1]; dst[2] = rgba[2]; dst[3] = rgba[3];
+                ((PFN_Unmap)((COM_OBJ*)ctx)->vtbl[15])(ctx, cb, 0);
+            }
+            ((PFN_VSSetCB)((COM_OBJ*)ctx)->vtbl[7])(ctx, 0, 1, &cb);
+        }
+
         ((PFN_OMSetRT)((COM_OBJ*)ctx)->vtbl[33])(ctx, 1, &rtv, 0);
         ((PFN_ClearRTV)((COM_OBJ*)ctx)->vtbl[50])(ctx, rtv, rgba);
         ((PFN_Present)((COM_OBJ*)sc)->vtbl[8])(sc, 1, 0);
     }
 
 done:
+    if (xa_src) ((PFN_XAVoice_Destroy)((COM_OBJ*)xa_src)->vtbl[18])(xa_src);
+    if (xa_master) ((PFN_XAVoice_Destroy)((COM_OBJ*)xa_master)->vtbl[18])(xa_master);
+    com_release(xa2);
+    com_release(cb);
     com_release(rtv);
     com_release(ctx);
     com_release(dev);

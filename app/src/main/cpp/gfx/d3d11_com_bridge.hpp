@@ -27,6 +27,7 @@ static_assert(sizeof(ComProxyObject) == 32);
 static_assert(offsetof(ComProxyObject, lpVtbl) == 0);
 
 using PresentHookFn = std::function<void(void* native_swap_chain, uint32_t sync_interval, uint32_t flags)>;
+using PresentHookRawFn = void (*)(void* native_swap_chain, uint32_t sync_interval, uint32_t flags);
 
 class D3D11ComBridge {
 public:
@@ -50,6 +51,11 @@ public:
         std::lock_guard<std::mutex> lk(mu_);
         has_present_hook_.store(static_cast<bool>(fn), std::memory_order_release);
         present_hook_ = std::move(fn);
+    }
+
+    // Lock-free zero-allocation Present hook used by the live 60 FPS Android runtime path
+    void set_present_hook_fast(PresentHookRawFn fn) noexcept {
+        present_hook_raw_.store(fn, std::memory_order_release);
     }
 
     ComProxyObject* wrap(void* native_obj, d3d11_abi::ComIfaceId iface) {
@@ -119,6 +125,7 @@ public:
         free_head_ = kInvalidSlot;
         active_count_.store(0, std::memory_order_relaxed);
         has_present_hook_.store(false, std::memory_order_release);
+        present_hook_raw_.store(nullptr, std::memory_order_release);
         present_hook_ = nullptr;
     }
 
@@ -157,15 +164,18 @@ public:
 
         // Intercept IDXGISwapChain::Present (slot 8) for overlay compositing & frame pacing
         if constexpr (Slot == d3d11_abi::DXGISwapChainSlots::kPresent) {
-            if (proxy->iface == d3d11_abi::ComIfaceId::DXGISwapChain &&
-                self.has_present_hook_.load(std::memory_order_acquire)) {
-                PresentHookFn hook;
-                {
-                    std::lock_guard<std::mutex> lk(self.mu_);
-                    hook = self.present_hook_;
-                }
-                if (hook) {
-                    hook(proxy->native_obj, static_cast<uint32_t>(rdx), static_cast<uint32_t>(r8));
+            if (proxy->iface == d3d11_abi::ComIfaceId::DXGISwapChain) {
+                if (auto raw = self.present_hook_raw_.load(std::memory_order_acquire)) {
+                    raw(proxy->native_obj, static_cast<uint32_t>(rdx), static_cast<uint32_t>(r8));
+                } else if (self.has_present_hook_.load(std::memory_order_acquire)) {
+                    PresentHookFn hook;
+                    {
+                        std::lock_guard<std::mutex> lk(self.mu_);
+                        hook = self.present_hook_;
+                    }
+                    if (hook) {
+                        hook(proxy->native_obj, static_cast<uint32_t>(rdx), static_cast<uint32_t>(r8));
+                    }
                 }
             }
         }
@@ -418,6 +428,7 @@ private:
     uint32_t free_head_ = kInvalidSlot;
     std::atomic<size_t> active_count_{0};
     std::atomic<bool> has_present_hook_{false};
+    std::atomic<PresentHookRawFn> present_hook_raw_{nullptr};
     PresentHookFn present_hook_;
 };
 

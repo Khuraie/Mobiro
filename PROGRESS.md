@@ -6,6 +6,16 @@
 
 ## Log Entries
 
+### Increment 27 — M25: Lock-Free `Present` Hook, Full XAudio2 + D3D11 Dynamic Buffer Self-Test & One-Command `-SelfTest` ADB Runner (2026-11-27)
+- **Status:** Implemented & verified (local MSVC 2022 tests + GitHub Actions CI + bundled ARM64 APK)
+- **Changes:**
+  - Added lock-free, zero-allocation `set_present_hook_fast(PresentHookRawFn)` (`std::atomic<PresentHookRawFn>`) in `app/src/main/cpp/gfx/d3d11_com_bridge.hpp` and wired `runtime_main.cpp` to it, eliminating the per-frame `std::mutex` lock + `std::function` copy on `IDXGISwapChain::Present`.
+  - Expanded clean-room `tools/mobiro_selftest.c` (`-nostdlib`) to exercise `IXAudio2_7` voice creation (`Initialize`, `CreateMasteringVoice`, `CreateSourceVoice`, `SetVolume(0.25f)` via `XMM1`, 50 ms stereo 48 kHz PCM16 `SubmitSourceBuffer`, `Start`, `DestroyVoice`) and per-frame D3D11 dynamic constant buffer updates (`CreateBuffer`, `Map`, `Unmap`, `VSSetConstantBuffers`).
+  - Added `-SelfTest` and `-Trace` flags to `scripts/stage_byof_adb.ps1` for one-command clean-room 60 FPS hardware benchmarking without staging BYOF files.
+  - Added `test_m25_lockfree_present_raw_hook` in `tests/test_core.cpp` (25/25 suites passing).
+
+---
+
 ### Increment 26 — M24: `SetResourceMinLOD` (`XMM2`), Exact `avgMs`/`maxMs` Frame Telemetry & Clean Guest-Exit UX (2026-11-27)
 - **Status:** Implemented & verified (local MSVC 2022 tests + live retail `--verify-byof` + GitHub Actions CI)
 - **Changes:**

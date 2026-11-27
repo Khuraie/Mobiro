@@ -1,23 +1,12 @@
 param(
-    [Parameter(Mandatory=$true)]
-    [string]$GameDir,
+    [string]$GameDir = "",
     [string]$ApkPath = "",
+    [switch]$SelfTest,
+    [switch]$Trace,
     [switch]$WatchLogcat
 )
 
 $ErrorActionPreference = "Stop"
-
-# Clean-room BYOF staging script: pushes the user's own legally owned local PC files
-# into Mobiro's Android app-scoped external storage for direct POSIX mmap access.
-if (-not (Test-Path (Join-Path $GameDir "sekiro.exe"))) {
-    throw "sekiro.exe not found in $GameDir"
-}
-for ($i = 1; $i -le 5; $i++) {
-    foreach ($ext in @("bhd", "bdt")) {
-        $f = Join-Path $GameDir ("Data{0}.{1}" -f $i, $ext)
-        if (-not (Test-Path $f)) { throw "Missing required BYOF archive: $f" }
-    }
-}
 
 $devices = (adb devices) | Select-String -Pattern "\tdevice$"
 if (-not $devices) { throw "No authorized Android device detected via ADB (enable USB Debugging)." }
@@ -26,6 +15,31 @@ if ($ApkPath -ne "") {
     if (-not (Test-Path $ApkPath)) { throw "APK not found: $ApkPath" }
     Write-Host "[Mobiro] Installing APK: $ApkPath"
     adb install -r $ApkPath
+}
+
+if ($SelfTest) {
+    $extras = "--ez selftest true"
+    if ($Trace) { $extras += " --ez trace true" }
+    Write-Host "[Mobiro] Launching built-in clean-room 60 FPS self-test ($extras)..."
+    adb shell am force-stop com.mobiro.runtime
+    adb shell "am start -n com.mobiro.runtime/.MainActivity $extras" | Out-Null
+    if ($WatchLogcat) {
+        Write-Host "[Mobiro] Streaming logcat (Ctrl+C to stop)..."
+        adb logcat -s Mobiro:V DXVK:I AndroidRuntime:E
+    }
+    exit 0
+}
+
+# Clean-room BYOF staging: pushes the user's own legally owned local PC files
+# into Mobiro's Android app-scoped external storage for direct POSIX mmap access.
+if ($GameDir -eq "" -or -not (Test-Path (Join-Path $GameDir "sekiro.exe"))) {
+    throw "Specify -SelfTest or a valid -GameDir containing sekiro.exe"
+}
+for ($i = 1; $i -le 5; $i++) {
+    foreach ($ext in @("bhd", "bdt")) {
+        $f = Join-Path $GameDir ("Data{0}.{1}" -f $i, $ext)
+        if (-not (Test-Path $f)) { throw "Missing required BYOF archive: $f" }
+    }
 }
 
 $remoteDir = "/sdcard/Android/data/com.mobiro.runtime/files/game"
@@ -48,7 +62,11 @@ foreach ($item in $items) {
 }
 
 Write-Host "[Mobiro] Staging complete. Launching com.mobiro.runtime..."
-adb shell monkey -p com.mobiro.runtime -c android.intent.category.LAUNCHER 1 | Out-Null
+if ($Trace) {
+    adb shell am start -n com.mobiro.runtime/.MainActivity --ez trace true | Out-Null
+} else {
+    adb shell monkey -p com.mobiro.runtime -c android.intent.category.LAUNCHER 1 | Out-Null
+}
 
 if ($WatchLogcat) {
     Write-Host "[Mobiro] Streaming logcat (Ctrl+C to stop)..."

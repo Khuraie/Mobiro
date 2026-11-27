@@ -2714,6 +2714,42 @@ void test_m24_set_resource_min_lod_xmm2_and_frame_ms_stats() {
     assert(st.avg_frame_ms() > 0.0 && st.max_frame_ms() >= st.avg_frame_ms());
 }
 
+void test_m25_lockfree_present_raw_hook() {
+    struct FakeSc { void** vtbl; };
+    static FakeSc g_sc{};
+    static std::atomic<uint32_t> g_raw_hits{0};
+    static uint32_t g_presents = 0;
+    g_raw_hits.store(0, std::memory_order_relaxed);
+    g_presents = 0;
+
+    static auto release_fn = +[](void*) -> uint32_t { return 0u; };
+    static auto present_fn = +[](void*, uint32_t, uint32_t) -> int32_t { ++g_presents; return 0; };
+    static void* sc_vtbl[18]{};
+    sc_vtbl[2] = reinterpret_cast<void*>(release_fn);
+    sc_vtbl[8] = reinterpret_cast<void*>(present_fn);
+    g_sc.vtbl = sc_vtbl;
+
+    auto& com = mobiro::gfx::D3D11ComBridge::global();
+    void* sc_p = com.wrap(&g_sc, mobiro::gfx::d3d11_abi::ComIfaceId::DXGISwapChain);
+    com.set_present_hook_fast(+[](void* nat, uint32_t sync, uint32_t) {
+        if (nat == &g_sc && sync == 1u) g_raw_hits.fetch_add(1, std::memory_order_relaxed);
+    });
+
+    for (int i = 0; i < 10000; ++i) {
+        x64emu_t emu{};
+        emu.rcx = reinterpret_cast<uint64_t>(sc_p);
+        emu.rdx = 1;
+        mobiro::gfx::D3D11ComBridge::dispatch_slot<8>(&emu);
+        assert(emu.rax == 0);
+    }
+    assert(g_presents == 10000 && g_raw_hits.load() == 10000);
+
+    com.set_present_hook_fast(nullptr);
+    x64emu_t emu{};
+    emu.rcx = reinterpret_cast<uint64_t>(sc_p);
+    mobiro::gfx::D3D11ComBridge::dispatch_slot<2>(&emu);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -2807,6 +2843,7 @@ int main(int argc, char** argv) {
     test_m22_end_to_end_d3d11_xaudio_xinput_60fps_selftest();
     test_m23_d3d11_hot_loop_and_hs_ds_so_unwrap();
     test_m24_set_resource_min_lod_xmm2_and_frame_ms_stats();
+    test_m25_lockfree_present_raw_hook();
     std::cout << "All Mobiro core unit tests passed.\n";
     return 0;
 }

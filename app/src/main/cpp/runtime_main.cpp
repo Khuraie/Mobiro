@@ -321,8 +321,8 @@ Java_com_mobiro_runtime_MainActivity_nativeConfigureAndValidate(
     g_rt.touch_overlay.attach_vulkan_loader(g_rt.vk_driver.get_instance_proc_addr);
     const bool dxvk_loaded = mobiro::gfx::DxvkInterop::global().load_native_libraries(lib_dir);
     g_rt.dxvk_loaded.store(dxvk_loaded, std::memory_order_relaxed);
-    mobiro::gfx::D3D11ComBridge::global().set_present_hook(
-        [](void*, uint32_t, uint32_t) {
+    mobiro::gfx::D3D11ComBridge::global().set_present_hook_fast(
+        +[](void*, uint32_t, uint32_t) {
             g_rt.touch_overlay.pack_quads(g_rt.touch_ctrl.build_hud_quads());
             const int64_t work_ns = mobiro::gfx::DxvkInterop::global().pace_present();
             if (work_ns > 0) g_rt.balancer.report_frame_work(work_ns);
