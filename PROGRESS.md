@@ -6,6 +6,16 @@
 
 ## Log Entries
 
+### Increment 25 — M23: D3D11 Draw-Loop Fast Path, Turnip VNDK `AHardwareBuffer_getNativeHandle` Bridge & Built-In APK 60 FPS Self-Test Mode (2026-11-27)
+- **Status:** Implemented & verified (local MSVC 2022 tests + GitHub Actions CI + full bundled ARM64 APK rebuild)
+- **Changes:**
+  - Hardened `scripts/patch_turnip_android_stubs.py` + `scripts/build_turnip_android.sh`: replaced the private VNDK `AHardwareBuffer_getNativeHandle` dynamic import in Mesa Turnip with an internal static `dlsym("libnativewindow.so", ...)` bridge (gracefully returning `NULL` if hidden in Android 15/16 `clns-*`) and added an automated `llvm-readelf --dyn-syms` CI gate.
+  - Optimized `D3D11ComBridge::dispatch_slot` (`app/src/main/cpp/gfx/d3d11_com_bridge.hpp`): eliminated unconditional 384-byte stack zero-initialization on non-array slots, added a 1..4-arg fast path for `AddRef`/`Release` and hot `D3D11DeviceContext` draw/state slots (`DrawIndexed`, `Draw`, `Unmap`, `IASetPrimitiveTopology`, `RSSetViewports`/`ScissorRects`, `ClearRenderTargetView`), and added proxy-array unwrapping for `SOSetTargets` (37) and all `HS`/`DS` resource/sampler/CB slots (59, 61, 62, 63, 65, 66).
+  - Wired built-in clean-room 60 FPS self-test mode (`--ez selftest true`) and trace toggle (`--ez trace true`) across `MainActivity.kt`, `runtime_main.cpp`, and `.github/workflows/build-third-party.yml` (bundling MinGW-compiled `app/src/main/assets/mobiro_selftest.exe` directly into the APK).
+  - Added `test_m23_d3d11_hot_loop_and_hs_ds_so_unwrap` in `tests/test_core.cpp` (23/23 suites passing, verifying 12,000 `DrawIndexed` dispatches complete well inside one 16.6 ms frame budget).
+
+---
+
 ### Increment 24 — M22: Zero-Overhead 60 FPS Trace Gating, Mesa Turnip Android 16 `clns-*` Stub Fix & Clean-Room Win64 D3D11 Self-Test (2026-11-27)
 - **Status:** Implemented & verified (local MSVC 2022 tests `0.22s` + retail `--verify-byof` + GitHub Actions CI & Turnip `arm64-v8a` rebuild)
 - **Changes:**

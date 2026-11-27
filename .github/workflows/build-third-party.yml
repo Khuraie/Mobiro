@@ -98,6 +98,15 @@ jobs:
           fi
           echo "MOBIRO_DEBUG_KEYSTORE=$KS" >> "$GITHUB_ENV"
 
+      - name: Build Clean-Room Win64 60 FPS Self-Test Asset
+        if: ${{ inputs.assemble_bundled_apk }}
+        run: |
+          sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+          mkdir -p app/src/main/assets
+          x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -fno-builtin -nostdlib -e WinMainCRTStartup \
+            tools/mobiro_selftest.c -o app/src/main/assets/mobiro_selftest.exe \
+            -lkernel32 -luser32 -ld3d11 -ldxgi -lwinmm
+
       - name: Assemble Bundled Debug APK (arm64-v8a)
         if: ${{ inputs.assemble_bundled_apk }}
         run: gradle :app:assembleDebug --no-daemon
@@ -117,5 +126,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: mobiro-arm64-bundled-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: |
+            app/build/outputs/apk/debug/app-debug.apk
+            app/src/main/assets/mobiro_selftest.exe
           retention-days: 14

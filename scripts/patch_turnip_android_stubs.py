@@ -13,9 +13,11 @@ import pathlib
 import sys
 
 
-HARDWARE_STUB_CPP = r"""#include <errno.h>
+HARDWARE_STUB_CPP = r"""#include <dlfcn.h>
+#include <errno.h>
 #include <stddef.h>
 #include <hardware/hardware.h>
+#include <vndk/hardware_buffer.h>
 
 extern "C" {
 
@@ -25,6 +27,24 @@ int hw_get_module(const char *id, const struct hw_module_t **module)
    if (module)
       *module = NULL;
    return -ENOENT;
+}
+
+/* Dynamic VNDK bridge: resolves AHardwareBuffer_getNativeHandle at runtime when exported,
+ * and returns NULL instead of failing dlopen() on Android 15/16 app namespaces (clns-*). */
+const native_handle_t *AHardwareBuffer_getNativeHandle(const AHardwareBuffer *buffer)
+{
+   typedef const native_handle_t *(*PfnGetNativeHandle)(const AHardwareBuffer *);
+   static PfnGetNativeHandle pfn = NULL;
+   static int resolved = 0;
+   if (!resolved) {
+      resolved = 1;
+      void *h = dlopen("libnativewindow.so", RTLD_NOW | RTLD_NOLOAD);
+      if (!h)
+         h = dlopen("libnativewindow.so", RTLD_NOW | RTLD_LOCAL);
+      if (h)
+         pfn = (PfnGetNativeHandle)dlsym(h, "AHardwareBuffer_getNativeHandle");
+   }
+   return pfn ? pfn(buffer) : NULL;
 }
 
 }
@@ -142,7 +162,17 @@ def main() -> int:
     (stub_dir / "hardware_stub.cpp").write_text(HARDWARE_STUB_CPP, encoding="utf-8")
     (stub_dir / "sync_stub.cpp").write_text(SYNC_STUB_CPP, encoding="utf-8")
     (stub_dir / "meson.build").write_text(ANDROID_STUB_MESON, encoding="utf-8")
-    print(f"[Mobiro] Patched Mesa android_stub at {stub_dir} (static hardware/sync, dynamic public NDK log/nativewindow)")
+
+    # Remove AHardwareBuffer_getNativeHandle from nativewindow_stub.cpp so ld resolves it
+    # against our static dlsym bridge in hardware_stub.cpp instead of an UND dynamic import.
+    nw_path = stub_dir / "nativewindow_stub.cpp"
+    if nw_path.is_file():
+        nw_txt = nw_path.read_text(encoding="utf-8")
+        marker = "const native_handle_t *\nAHardwareBuffer_getNativeHandle(const AHardwareBuffer *buffer)\n{\n   return NULL;\n}"
+        if marker in nw_txt:
+            nw_path.write_text(nw_txt.replace(marker, "/* AHardwareBuffer_getNativeHandle bridged in hardware_stub.cpp */"), encoding="utf-8")
+
+    print(f"[Mobiro] Patched Mesa android_stub at {stub_dir} (static hardware/sync/VNDK-handle, dynamic public NDK log/nativewindow)")
     return 0
 
 

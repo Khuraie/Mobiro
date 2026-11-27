@@ -2565,6 +2565,102 @@ void test_m22_end_to_end_d3d11_xaudio_xinput_60fps_selftest() {
     bridge.shutdown();
 }
 
+void test_m23_d3d11_hot_loop_and_hs_ds_so_unwrap() {
+    struct FakeObj { void** vtbl; };
+    static FakeObj g_dev{}, g_ctx{}, g_buf{}, g_srv{}, g_ps{}, g_q{};
+    static uint32_t g_draws = 0, g_so_ok = 0, g_hs_ok = 0, g_ds_ok = 0;
+    g_draws = g_so_ok = g_hs_ok = g_ds_ok = 0;
+
+    static auto release_fn = +[](void*) -> uint32_t { return 0u; };
+    static auto dev_create_ps = +[](void*, const void*, size_t, void*, void** out) -> int32_t {
+        if (out) *out = &g_ps;
+        return 0;
+    };
+    static auto dev_create_query = +[](void*, const void*, void** out) -> int32_t {
+        if (out) *out = &g_q;
+        return 0;
+    };
+    static auto ctx_draw_indexed = +[](void*, uint32_t idx_cnt, uint32_t, int32_t) {
+        if (idx_cnt == 36) ++g_draws;
+    };
+    static auto ctx_so_set = +[](void*, uint32_t n, void* const* bufs, const uint32_t*) {
+        if (n == 1 && bufs && bufs[0] == &g_buf) ++g_so_ok;
+    };
+    static auto ctx_hs_srv = +[](void*, uint32_t, uint32_t n, void* const* srvs) {
+        if (n == 1 && srvs && srvs[0] == &g_srv) ++g_hs_ok;
+    };
+    static auto ctx_ds_cb = +[](void*, uint32_t, uint32_t n, void* const* cbs) {
+        if (n == 1 && cbs && cbs[0] == &g_buf) ++g_ds_ok;
+    };
+
+    static void* child_vtbl[14]{};
+    child_vtbl[2] = reinterpret_cast<void*>(release_fn);
+    g_buf.vtbl = g_srv.vtbl = g_ps.vtbl = g_q.vtbl = child_vtbl;
+
+    static void* dev_vtbl[43]{};
+    dev_vtbl[2]  = reinterpret_cast<void*>(release_fn);
+    dev_vtbl[15] = reinterpret_cast<void*>(dev_create_ps);
+    dev_vtbl[24] = reinterpret_cast<void*>(dev_create_query);
+    g_dev.vtbl = dev_vtbl;
+
+    static void* ctx_vtbl[115]{};
+    ctx_vtbl[2]  = reinterpret_cast<void*>(release_fn);
+    ctx_vtbl[12] = reinterpret_cast<void*>(ctx_draw_indexed);
+    ctx_vtbl[37] = reinterpret_cast<void*>(ctx_so_set);
+    ctx_vtbl[59] = reinterpret_cast<void*>(ctx_hs_srv);
+    ctx_vtbl[66] = reinterpret_cast<void*>(ctx_ds_cb);
+    g_ctx.vtbl = ctx_vtbl;
+
+    auto& com = mobiro::gfx::D3D11ComBridge::global();
+    void* dev_p = com.wrap(&g_dev, mobiro::gfx::d3d11_abi::ComIfaceId::D3D11Device);
+    void* ctx_p = com.wrap(&g_ctx, mobiro::gfx::d3d11_abi::ComIfaceId::D3D11DeviceContext);
+    void* buf_p = com.wrap(&g_buf, mobiro::gfx::d3d11_abi::ComIfaceId::D3D11ResourceChild);
+    void* srv_p = com.wrap(&g_srv, mobiro::gfx::d3d11_abi::ComIfaceId::D3D11ResourceChild);
+
+    // 1. Verify D3D11Device::CreatePixelShader (slot 15) and CreateQuery (slot 24) still auto-wrap out-params
+    void* ps_p = nullptr;
+    uint64_t stack[12]{};
+    stack[5] = reinterpret_cast<uint64_t>(&ps_p);
+    x64emu_t emu{};
+    emu.rcx = reinterpret_cast<uint64_t>(dev_p);
+    emu.rsp = reinterpret_cast<uint64_t>(stack);
+    mobiro::gfx::D3D11ComBridge::dispatch_slot<15>(&emu);
+    assert(emu.rax == 0 && ps_p && com.unwrap_arg(reinterpret_cast<uint64_t>(ps_p)) == reinterpret_cast<uintptr_t>(&g_ps));
+
+    void* q_p = nullptr;
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>(dev_p); emu.r8 = reinterpret_cast<uint64_t>(&q_p);
+    mobiro::gfx::D3D11ComBridge::dispatch_slot<24>(&emu);
+    assert(emu.rax == 0 && q_p && com.unwrap_arg(reinterpret_cast<uint64_t>(q_p)) == reinterpret_cast<uintptr_t>(&g_q));
+
+    // 2. Verify SOSetTargets (37), HSSetShaderResources (59), DSSetConstantBuffers (66) unwrap proxy arrays
+    void* arr_buf[1] = {buf_p};
+    void* arr_srv[1] = {srv_p};
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>(ctx_p); emu.rdx = 1; emu.r8 = reinterpret_cast<uint64_t>(arr_buf);
+    mobiro::gfx::D3D11ComBridge::dispatch_slot<37>(&emu);
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>(ctx_p); emu.rdx = 0; emu.r8 = 1; emu.r9 = reinterpret_cast<uint64_t>(arr_srv);
+    mobiro::gfx::D3D11ComBridge::dispatch_slot<59>(&emu);
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>(ctx_p); emu.rdx = 0; emu.r8 = 1; emu.r9 = reinterpret_cast<uint64_t>(arr_buf);
+    mobiro::gfx::D3D11ComBridge::dispatch_slot<66>(&emu);
+    assert(g_so_ok == 1 && g_hs_ok == 1 && g_ds_ok == 1);
+
+    // 3. Hot draw-loop throughput: 12,000 DrawIndexed (slot 12) fast-path dispatches must finish well within 1 frame (<16.6 ms)
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < 12000; ++i) {
+        emu = {};
+        emu.rcx = reinterpret_cast<uint64_t>(ctx_p);
+        emu.rdx = 36;
+        mobiro::gfx::D3D11ComBridge::dispatch_slot<12>(&emu);
+    }
+    const auto dt_us = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - t0).count();
+    assert(g_draws == 12000 && dt_us < 16'600);
+
+    for (void* p : {q_p, ps_p, srv_p, buf_p, ctx_p, dev_p}) {
+        emu = {}; emu.rcx = reinterpret_cast<uint64_t>(p);
+        mobiro::gfx::D3D11ComBridge::dispatch_slot<2>(&emu);
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -2656,6 +2752,7 @@ int main(int argc, char** argv) {
     test_m19_win64_static_tls_pointer_isolation();
     test_m21_vfs_prefix_crt_file_mapping_and_ntdll();
     test_m22_end_to_end_d3d11_xaudio_xinput_60fps_selftest();
+    test_m23_d3d11_hot_loop_and_hs_ds_so_unwrap();
     std::cout << "All Mobiro core unit tests passed.\n";
     return 0;
 }

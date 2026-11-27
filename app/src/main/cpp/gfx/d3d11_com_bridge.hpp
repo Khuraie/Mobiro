@@ -188,6 +188,32 @@ public:
         uint64_t a1 = self.unwrap_arg(rdx);
         uint64_t a2 = self.unwrap_arg(r8);
         uint64_t a3 = self.unwrap_arg(r9);
+
+        // Fast path for 1..4-arg hot slots: skips 6 stack loads + unwrap checks.
+        // Slot 1/2 (IUnknown::AddRef/Release) apply to all COM interfaces; slots 12/13/15/24/44/45/50
+        // (DrawIndexed, Draw, Unmap, IASetPrimitiveTopology, RSSetViewports/ScissorRects, ClearRTV)
+        // are strictly gated to D3D11DeviceContext so D3D11Device::Create*Shader/CreateQuery & ResizeBuffers keep full dispatch.
+        if constexpr (Slot == 1 || Slot == 2) {
+            using FastFn = uint64_t (*)(void*);
+            auto fn = reinterpret_cast<FastFn>(native_vtbl[Slot]);
+            const uint64_t ret = fn(proxy->native_obj);
+            rax = ret;
+            if constexpr (Slot == 2) {
+                if (static_cast<uint32_t>(ret) == 0) {
+                    self.destroy_proxy(proxy);
+                }
+            }
+            return;
+        } else if constexpr (Slot == 12 || Slot == 13 || Slot == 15 || Slot == 24 ||
+                             Slot == 44 || Slot == 45 || Slot == 50) {
+            if (proxy->iface == d3d11_abi::ComIfaceId::D3D11DeviceContext) {
+                using FastFn = uint64_t (*)(void*, uint64_t, uint64_t, uint64_t);
+                auto fn = reinterpret_cast<FastFn>(native_vtbl[Slot]);
+                rax = fn(proxy->native_obj, a1, a2, a3);
+                return;
+            }
+        }
+
         uint64_t a4 = sp ? self.unwrap_arg(sp[5]) : 0;
         uint64_t a5 = sp ? self.unwrap_arg(sp[6]) : 0;
         uint64_t a6 = sp ? self.unwrap_arg(sp[7]) : 0;
@@ -196,22 +222,49 @@ public:
         uint64_t a9 = sp ? self.unwrap_arg(sp[10]) : 0;
 
         // Zero-heap stack unwrapping for ID3D11DeviceContext methods taking arrays of COM pointers
-        uint64_t tmp_arr0[32]{};
-        uint64_t tmp_arr1[16]{};
-        if (proxy->iface == d3d11_abi::ComIfaceId::D3D11DeviceContext) {
-            if constexpr (Slot == 7 || Slot == 8 || Slot == 10 || Slot == 16 || Slot == 18 ||
-                          Slot == 22 || Slot == 25 || Slot == 26 || Slot == 67 || Slot == 68 ||
-                          Slot == 70 || Slot == 71) {
-                // (this, StartSlot, NumItems, T* const* ppItems, ...)
-                a3 = self.unwrap_proxy_array(a3, static_cast<uint32_t>(a2), tmp_arr0, 32);
-            } else if constexpr (Slot == 33) {
-                // OMSetRenderTargets(this, NumViews, ppRTVs, pDSV)
-                a2 = self.unwrap_proxy_array(a2, static_cast<uint32_t>(a1), tmp_arr0, 32);
-            } else if constexpr (Slot == 34) {
-                // OMSetRenderTargetsAndUnorderedAccessViews(this, NumRTVs, ppRTVs, pDSV, UAVStart, NumUAVs, ppUAVs, ...)
-                a2 = self.unwrap_proxy_array(a2, static_cast<uint32_t>(a1), tmp_arr0, 32);
-                a6 = self.unwrap_proxy_array(a6, static_cast<uint32_t>(a5), tmp_arr1, 16);
+        // (allocated only on array-bearing slots to avoid 384B memset overhead on every draw call).
+        if constexpr (Slot == 7 || Slot == 8 || Slot == 10 || Slot == 16 || Slot == 18 ||
+                      Slot == 22 || Slot == 25 || Slot == 26 || Slot == 33 || Slot == 34 ||
+                      Slot == 37 || Slot == 59 || Slot == 61 || Slot == 62 || Slot == 63 ||
+                      Slot == 65 || Slot == 66 || Slot == 67 || Slot == 68 || Slot == 70 ||
+                      Slot == 71) {
+            uint64_t tmp_arr0[32];
+            uint64_t tmp_arr1[16];
+            if (proxy->iface == d3d11_abi::ComIfaceId::D3D11DeviceContext) {
+                if constexpr (Slot == 33 || Slot == 37) {
+                    // OMSetRenderTargets(NumViews, ppRTVs, pDSV) / SOSetTargets(NumBuffers, ppSOTargets, pOffsets)
+                    a2 = self.unwrap_proxy_array(a2, static_cast<uint32_t>(a1), tmp_arr0, 32);
+                } else if constexpr (Slot == 34) {
+                    // OMSetRenderTargetsAndUnorderedAccessViews
+                    a2 = self.unwrap_proxy_array(a2, static_cast<uint32_t>(a1), tmp_arr0, 32);
+                    a6 = self.unwrap_proxy_array(a6, static_cast<uint32_t>(a5), tmp_arr1, 16);
+                } else {
+                    // (this, StartSlot, NumItems, T* const* ppItems, ...)
+                    a3 = self.unwrap_proxy_array(a3, static_cast<uint32_t>(a2), tmp_arr0, 32);
+                }
             }
+            using NativeFn = uint64_t (*)(void*, uint64_t, uint64_t, uint64_t, uint64_t,
+                                          uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+            auto fn = reinterpret_cast<NativeFn>(native_vtbl[Slot]);
+            const uint64_t ret = fn(proxy->native_obj, a1, a2, a3, a4, a5, a6, a7, a8, a9);
+            rax = ret;
+            if constexpr (Slot == 7 || Slot == 8 || Slot == 10) {
+                const bool hr_ok = (static_cast<int32_t>(ret) >= 0);
+                if (proxy->iface == d3d11_abi::ComIfaceId::D3D11Device && hr_ok) {
+                    self.wrap_out_ptr(r9, d3d11_abi::ComIfaceId::D3D11ResourceChild);
+                } else if constexpr (Slot == 7) {
+                    if (proxy->iface == d3d11_abi::ComIfaceId::DXGIFactory1 && hr_ok) {
+                        self.wrap_out_ptr(r8, d3d11_abi::ComIfaceId::DXGIAdapter1);
+                    } else if (proxy->iface == d3d11_abi::ComIfaceId::DXGIAdapter1 && hr_ok) {
+                        self.wrap_out_ptr(r8, d3d11_abi::ComIfaceId::DXGIOutput);
+                    }
+                } else if constexpr (Slot == 10) {
+                    if (proxy->iface == d3d11_abi::ComIfaceId::DXGIFactory1 && hr_ok) {
+                        self.wrap_out_ptr(r9, d3d11_abi::ComIfaceId::DXGISwapChain);
+                    }
+                }
+            }
+            return;
         }
 
         // Forward up to 10 pointer/integer arguments to native AAPCS64/host COM method.

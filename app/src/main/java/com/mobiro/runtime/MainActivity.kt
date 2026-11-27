@@ -52,11 +52,20 @@ class MainActivity : GameActivity() {
         }
         thermalMonitor.start()
 
+        val traceExtra = intent?.getBooleanExtra("trace", false) == true
+        val traceMarker = File(getExternalFilesDir(null), "mobiro_trace.enable")
+        if (traceExtra) {
+            traceMarker.parentFile?.mkdirs()
+            traceMarker.writeText("1")
+        }
+
+        val selfTestRequested = intent?.getBooleanExtra("selftest", false) == true
         val savedPath = prefs().getString(KEY_BYOF_PATH, null)
         val defaultDir = defaultByofDir().apply { mkdirs() }
         when {
-            savedPath != null && File(savedPath, "sekiro.exe").isFile -> startNativeContainer(savedPath)
-            File(defaultDir, "sekiro.exe").isFile -> startNativeContainer(defaultDir.absolutePath)
+            selfTestRequested -> startSelfTestContainer()
+            savedPath != null && File(savedPath, "sekiro.exe").isFile -> startNativeContainer(savedPath, false)
+            File(defaultDir, "sekiro.exe").isFile -> startNativeContainer(defaultDir.absolutePath, false)
             else -> {
                 try {
                     pickByofDirectory.launch(null)
@@ -84,11 +93,25 @@ class MainActivity : GameActivity() {
         }
     }
 
-    private fun startNativeContainer(gameDir: String) {
+    private fun startSelfTestContainer() {
+        val dir = File(getExternalFilesDir(null), "selftest").apply { mkdirs() }
+        val exe = File(dir, "sekiro.exe")
+        try {
+            assets.open("mobiro_selftest.exe").use { input ->
+                exe.outputStream().use { output -> input.copyTo(output) }
+            }
+            startNativeContainer(dir.absolutePath, true)
+        } catch (e: Exception) {
+            Log.e(TAG, "Self-test payload unavailable in APK assets: ${e.message}")
+            Toast.makeText(this, "Self-test payload not bundled in this build.", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun startNativeContainer(gameDir: String, selfTest: Boolean = false) {
         val saveDir = File(filesDir, "saves_overlay").apply { mkdirs() }.absolutePath
         val cacheDir = File(cacheDir, "runtime_cache").apply { mkdirs() }.absolutePath
         val nativeLibDir = applicationInfo.nativeLibraryDir
-        val err = nativeConfigureAndValidate(gameDir, saveDir, cacheDir, nativeLibDir)
+        val err = nativeConfigureAndValidate(gameDir, saveDir, cacheDir, nativeLibDir, selfTest)
         if (err.isNotEmpty()) {
             Log.e(TAG, "BYOF validation failed: $err")
             Toast.makeText(this, "Validation failed: $err", Toast.LENGTH_LONG).show()
@@ -131,7 +154,8 @@ class MainActivity : GameActivity() {
         gameDir: String,
         saveDir: String,
         cacheDir: String,
-        nativeLibDir: String
+        nativeLibDir: String,
+        selfTest: Boolean
     ): String
 
     private external fun nativeGetDiagnosticsSummary(): String

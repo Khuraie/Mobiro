@@ -75,5 +75,9 @@ if echo "$NEEDED" | grep -Eq 'libhardware\.so|libsync\.so|libbacktrace\.so|libcu
   echo "[Mobiro] ERROR: Private Android system library leaked into libvulkan_freedreno.so DT_NEEDED!" >&2
   exit 1
 fi
+if "$BIN/llvm-readelf" --dyn-syms "$JNI_OUT/libvulkan_freedreno.so" | grep -E 'UND[[:space:]]+AHardwareBuffer_getNativeHandle'; then
+  echo "[Mobiro] ERROR: Private VNDK symbol AHardwareBuffer_getNativeHandle is still UND in libvulkan_freedreno.so!" >&2
+  exit 1
+fi
 
 echo "[Mobiro] Turnip ICD staged at $JNI_OUT/libvulkan_freedreno.so"

@@ -212,7 +212,8 @@ size_t mobiro_touch_overlay_copy_vertices(void* dst_vbo, size_t max_bytes) {
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_mobiro_runtime_MainActivity_nativeConfigureAndValidate(
-    JNIEnv* env, jobject /*thiz*/, jstring jGameDir, jstring jSaveDir, jstring jCacheDir, jstring jNativeLibDir) {
+    JNIEnv* env, jobject /*thiz*/, jstring jGameDir, jstring jSaveDir, jstring jCacheDir,
+    jstring jNativeLibDir, jboolean jSelfTest) {
     const char* c_game  = env->GetStringUTFChars(jGameDir, nullptr);
     const char* c_save  = env->GetStringUTFChars(jSaveDir, nullptr);
     const char* c_cache = env->GetStringUTFChars(jCacheDir, nullptr);
@@ -222,6 +223,7 @@ Java_com_mobiro_runtime_MainActivity_nativeConfigureAndValidate(
     std::string save_dir  = c_save  ? c_save  : "";
     std::string cache_dir = c_cache ? c_cache : "";
     std::string lib_dir   = c_libs  ? c_libs  : "";
+    const bool self_test  = (jSelfTest == JNI_TRUE);
 
     env->ReleaseStringUTFChars(jGameDir, c_game);
     env->ReleaseStringUTFChars(jSaveDir, c_save);
@@ -237,13 +239,23 @@ Java_com_mobiro_runtime_MainActivity_nativeConfigureAndValidate(
             std::fclose(f);
         }
     }
-    mobiro_boot_log("Configure start: game_dir=%s lib_dir=%s", game_dir.c_str(), lib_dir.c_str());
+    mobiro_boot_log("Configure start: game_dir=%s lib_dir=%s selftest=%d",
+                    game_dir.c_str(), lib_dir.c_str(), self_test ? 1 : 0);
 
-    // 1. Clean-room BYOF validation (PE32+ header + Data0..5 .bhd/.bdt BDF4 magic)
-    auto report = mobiro::validator::validate_byof_directory(game_dir, g_rt.vfs);
-    if (!report.ok) {
-        mobiro_boot_log("BYOF validation failed: %s", report.error.c_str());
-        return env->NewStringUTF(report.error.c_str());
+    // 1. Clean-room BYOF validation (or direct PE64 index in clean-room self-test mode)
+    std::string build_fingerprint = "mobiro_selftest";
+    if (self_test) {
+        if (!g_rt.vfs.index_root(game_dir)) {
+            mobiro_boot_log("Self-test directory missing: %s", game_dir.c_str());
+            return env->NewStringUTF("Self-test directory missing.");
+        }
+    } else {
+        auto report = mobiro::validator::validate_byof_directory(game_dir, g_rt.vfs);
+        if (!report.ok) {
+            mobiro_boot_log("BYOF validation failed: %s", report.error.c_str());
+            return env->NewStringUTF(report.error.c_str());
+        }
+        build_fingerprint = report.pe.build_fingerprint;
     }
 
     // 2. Initialize thread topology & bind main thread
@@ -252,11 +264,11 @@ Java_com_mobiro_runtime_MainActivity_nativeConfigureAndValidate(
 
     // 3. Configure persistent writable save overlay + per-build shader/pipeline cache + dynamic dxvk.conf
     g_rt.vfs.set_write_overlay(save_dir);
-    const std::string build_cache = cache_dir + "/" + report.pe.build_fingerprint;
+    const std::string build_cache = cache_dir + "/" + build_fingerprint;
     std::error_code ec;
     std::filesystem::create_directories(build_cache + "/turnip", ec);
     std::filesystem::create_directories(build_cache + "/dxvk", ec);
-    g_rt.cache_warmer.start_async_warm(cache_dir, report.pe.build_fingerprint, &g_rt.balancer);
+    g_rt.cache_warmer.start_async_warm(cache_dir, build_fingerprint, &g_rt.balancer);
 
     const std::string dxvk_conf_path = build_cache + "/dxvk.conf";
     mobiro::gfx::DxvkProfileParams params{
