@@ -6,12 +6,13 @@
 
 ## Log Entries
 
-### Increment 28 — M26: Clean-Room Public-NDK Turnip Vulkan WSI Shim (`VK_KHR_android_surface`/`VK_KHR_swapchain`) & DXVK Loader Binding (2026-11-27)
-- **Status:** Implemented & verified (live Honor Magic5 Pro Android 16 diagnosis + local MSVC tests + GitHub Actions DXVK rebuild + live hardware run)
+### Increment 28 — M26: Clean-Room Public-NDK Turnip Vulkan WSI Shim (`VK_KHR_android_surface`/`VK_KHR_swapchain`), DXVK 3.2+ on Mesa Turnip 26.99.99 & Live 2848×1312 60 FPS Verification on Snapdragon 8 Gen 2 (2026-11-27)
+- **Status:** Implemented & **verified LIVE on Honor Magic5 Pro (`PGT-AN10`, Snapdragon 8 Gen 2 / Adreno 740, Android 16)** (`Run 45959634972`)
 - **Changes:**
-  - Verified live on Honor Magic5 Pro (Snapdragon 8 Gen 2 / Android 16): patched Mesa Turnip (`libvulkan_freedreno.so`) now loads natively via Android HAL `HMI` (`turnip=1, turnip_err=none`), while Qualcomm's OEM Adreno 740 driver (`0.676.3`) was skipped by DXVK 3.2+ for lacking `shaderInt64`.
-  - Implemented clean-room `TurnipWsiShim` (`app/src/main/cpp/gfx/turnip_wsi_shim.hpp`) layered directly over Mesa Turnip's `HMI` Vulkan 1.3 ICD using 100% public Android NDK `ANativeWindow` APIs (zero root / zero linker-namespace bypasses): advertises `VK_KHR_surface`, `VK_KHR_android_surface`, and `VK_KHR_swapchain`, allocates Turnip device-local swapchain images + UMA host-coherent staging copy, and presents via `ANativeWindow_lock`/`ANativeWindow_unlockAndPost`.
-  - Exported `mobiro_get_vk_instance_proc_addr()` from `runtime_main.cpp` and patched DXVK's `src/vulkan/vulkan_loader.cpp` (`scripts/patch_dxvk_android_wsi.py`) to bind directly to Mobiro's Turnip WSI loader before falling back to system `libvulkan.so`.
+  - Verified live on Honor Magic5 Pro (Android 16): patched Mesa Turnip (`libvulkan_freedreno.so`) loads natively via Android HAL `HMI` (`turnip=1, turnip_err=none`), whereas Qualcomm's OEM Adreno 740 driver (`0.676.3`) was skipped by DXVK 3.2+ for lacking `shaderInt64`.
+  - Implemented clean-room `TurnipWsiShim` (`app/src/main/cpp/gfx/turnip_wsi_shim.hpp`) layered directly over Mesa Turnip's Vulkan 1.3 ICD using 100% public Android NDK `ANativeWindow` APIs (zero root / zero linker-namespace bypasses): advertises `VK_KHR_surface`, `VK_KHR_android_surface`, and `VK_KHR_swapchain`, allocates Turnip device-local swapchain images + UMA host-coherent staging copy, and presents via `ANativeWindow_lock`/`ANativeWindow_unlockAndPost`.
+  - Exported `mobiro_get_vk_instance_proc_addr()` from `runtime_main.cpp`, patched DXVK's `src/vulkan/vulkan_loader.cpp` (`scripts/patch_dxvk_android_wsi.py`) to bind to it, fixed Android `RTLD_LOCAL` cross-`.so` symbol lookup via `dlopen("libsekiro_runtime.so", RTLD_NOW | RTLD_NOLOAD)` across `wsi_platform_android.cpp`, `mobiro_touch_hud.cpp`, and `vulkan_loader.cpp`, and bumped Turnip to `-Dplatform-sdk-version=35 -Dandroid-strict=false` (`scripts/build_turnip_android.sh`) to expose `VK_KHR_load_store_op_none` and `VK_KHR_maintenance5/6`.
+  - **Live Hardware Telemetry (`AD3J023A18000309`, zero-trace run):** `libvulkan_freedreno.so` (`turnip=1, dxvk_native=1, turnip_err=none`) → DXVK 3.2+ bound `Turnip Adreno (TM) 740 (turnip Mesa driver 26.99.99)` with `Graphics pipeline libraries supported`, `D3D_FEATURE_LEVEL_11_1`, and triple-buffered `2848x1312` `VK_FORMAT_R8G8B8A8_UNORM` swapchain (`60.0 FPS` limiter) → Box64 ARM64 Dynarec executed `mobiro_selftest.exe` (XAudio2.7 → AAudio, dynamic D3D11 constant buffers, `XInputGetState`, 120 rendered `Present` frames + `MobiroTouchHud`) end-to-end in `2.443s` total wall time (cold init + 2.00s @ 60 FPS) with clean `Guest exited ok=1 rax=0x0`.
   - Added `test_m26_turnip_wsi_extension_filter` in `tests/test_core.cpp` (26/26 suites passing).
 
 ---
