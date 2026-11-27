@@ -3,11 +3,14 @@
 #include "turnip_loader.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #if defined(__ANDROID__)
@@ -17,6 +20,19 @@
 #endif
 
 namespace mobiro::gfx {
+
+// Aspect-preserving swapchain extent cap (portable, tested on host & Android).
+// Keeps high-DPI mobile panels (e.g. 2848x1312) at crisp <=900p so Adreno fill-rate & UMA
+// staging bandwidth stay >2x lower while SurfaceFlinger hardware-scales to native panel size.
+inline std::pair<uint32_t, uint32_t> compute_scaled_swapchain_extent(
+    uint32_t win_w, uint32_t win_h, uint32_t max_height) {
+    if (win_w == 0 || win_h == 0) return {1280u, 720u};
+    if (max_height == 0 || win_h <= max_height) return {win_w, win_h};
+    const uint32_t sh = std::max<uint32_t>(2u, max_height & ~1u);
+    const uint64_t scaled_w_raw = (static_cast<uint64_t>(win_w) * sh + (win_h / 2u)) / win_h;
+    const uint32_t sw = std::max<uint32_t>(2u, static_cast<uint32_t>(scaled_w_raw) & ~1u);
+    return {sw, sh};
+}
 
 // Portable WSI extension filter used by TurnipWsiShim (tested on host & Android)
 inline std::vector<const char*> filter_turnip_wsi_extensions(
@@ -60,8 +76,22 @@ public:
     bool initialize(const VulkanDriverHandle& drv) {
         std::lock_guard<std::mutex> lk(mu_);
         drv_ = drv;
+        if (const char* env_h = std::getenv("MOBIRO_MAX_RENDER_HEIGHT"); env_h && env_h[0]) {
+            const long v = std::strtol(env_h, nullptr, 10);
+            if (v >= 0 && v <= 4320) {
+                max_render_height_.store(static_cast<uint32_t>(v), std::memory_order_relaxed);
+            }
+        }
         ready_ = drv.using_turnip && drv.get_instance_proc_addr != nullptr;
         return ready_;
+    }
+
+    void set_max_render_height(uint32_t max_height) {
+        max_render_height_.store(max_height, std::memory_order_relaxed);
+    }
+
+    uint32_t max_render_height() const {
+        return max_render_height_.load(std::memory_order_relaxed);
     }
 
     void shutdown() {
@@ -138,21 +168,29 @@ private:
         ANativeWindow* window = nullptr;
     };
 
-    // shortcut: uses public NDK ANativeWindow_lock + UMA staging copy (~60 us @ 720p LPDDR5X);
+    // shortcut: uses public NDK ANativeWindow_lock + double-buffered async UMA staging copy;
     // upgrade to zero-copy AHardwareBuffer import once Android 16 gralloc export is available in clns-*.
     struct SwapchainObj {
+        static constexpr uint32_t kStagingSlots = 2;
+        struct StagingSlot {
+            VkBuffer buf = VK_NULL_HANDLE;
+            VkDeviceMemory mem = VK_NULL_HANDLE;
+            void* mapped = nullptr;
+            VkCommandBuffer cmd_buf = VK_NULL_HANDLE;
+            VkFence fence = VK_NULL_HANDLE;
+            bool in_flight = false;
+        };
+
         VkDevice device = VK_NULL_HANDLE;
+        DeviceRec dev_rec{};
         ANativeWindow* window = nullptr;
         uint32_t width = 1280;
         uint32_t height = 720;
         std::vector<VkImage> images;
         std::vector<VkDeviceMemory> image_mems;
-        VkBuffer staging_buf = VK_NULL_HANDLE;
-        VkDeviceMemory staging_mem = VK_NULL_HANDLE;
-        void* staging_mapped = nullptr;
         VkCommandPool cmd_pool = VK_NULL_HANDLE;
-        VkCommandBuffer cmd_buf = VK_NULL_HANDLE;
-        VkFence present_fence = VK_NULL_HANDLE;
+        StagingSlot staging[kStagingSlots]{};
+        uint32_t staging_cursor = 0;
         uint32_t next_index = 0;
     };
 
@@ -425,8 +463,11 @@ private:
             const int32_t nw = ANativeWindow_getWidth(s->window);
             const int32_t nh = ANativeWindow_getHeight(s->window);
             if (nw > 0 && nh > 0) {
-                w = static_cast<uint32_t>(nw);
-                h = static_cast<uint32_t>(nh);
+                const auto scaled = compute_scaled_swapchain_extent(
+                    static_cast<uint32_t>(nw), static_cast<uint32_t>(nh),
+                    global().max_render_height());
+                w = scaled.first;
+                h = scaled.second;
             }
         }
         *pCaps = {};
@@ -498,6 +539,7 @@ private:
 
         auto* sc = new SwapchainObj();
         sc->device = dev;
+        sc->dev_rec = d;
         sc->window = surf->window;
         ANativeWindow_acquire(sc->window);
         sc->width = pInfo->imageExtent.width ? pInfo->imageExtent.width : 1280u;
@@ -509,7 +551,8 @@ private:
         VkPhysicalDeviceMemoryProperties mem_props{};
         irec.get_mem_props(d.phys, &mem_props);
 
-        const uint32_t img_count = std::clamp<uint32_t>(pInfo->minImageCount, 2u, 3u);
+        // Enforce >=3 images so async double-buffered staging never races with next-image acquire
+        const uint32_t img_count = std::clamp<uint32_t>(pInfo->minImageCount, 3u, 4u);
         for (uint32_t i = 0; i < img_count; ++i) {
             VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
             ici.imageType = VK_IMAGE_TYPE_2D;
@@ -546,45 +589,50 @@ private:
             sc->image_mems.push_back(mem);
         }
 
-        // Linear UMA host-coherent staging buffer for ANativeWindow_lock present
+        VkCommandPoolCreateInfo cpci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+        cpci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+        cpci.queueFamilyIndex = d.queue_family;
+        if (d.create_cmd_pool(dev, &cpci, nullptr, &sc->cmd_pool) != VK_SUCCESS) {
+            shim_vkDestroySwapchainKHR(dev, reinterpret_cast<VkSwapchainKHR>(sc), nullptr);
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+
+        // Double-buffered linear UMA host-coherent staging slots for async ANativeWindow_lock present
         VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
         bci.size = static_cast<VkDeviceSize>(sc->width) * sc->height * 4ULL;
         bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        if (d.create_buffer(dev, &bci, nullptr, &sc->staging_buf) != VK_SUCCESS) {
-            shim_vkDestroySwapchainKHR(dev, reinterpret_cast<VkSwapchainKHR>(sc), nullptr);
-            return VK_ERROR_OUT_OF_DEVICE_MEMORY;
-        }
-        VkMemoryRequirements breq{};
-        d.get_buf_req(dev, sc->staging_buf, &breq);
-        uint32_t bmt = find_mem_type(
-            mem_props, breq.memoryTypeBits,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        if (bmt == UINT32_MAX) {
-            bmt = find_mem_type(mem_props, breq.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
-        }
-        VkMemoryAllocateInfo bmai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-        bmai.allocationSize = breq.size;
-        bmai.memoryTypeIndex = bmt;
-        if (d.alloc_mem(dev, &bmai, nullptr, &sc->staging_mem) != VK_SUCCESS ||
-            d.bind_buf_mem(dev, sc->staging_buf, sc->staging_mem, 0) != VK_SUCCESS ||
-            d.map_mem(dev, sc->staging_mem, 0, bci.size, 0, &sc->staging_mapped) != VK_SUCCESS) {
-            shim_vkDestroySwapchainKHR(dev, reinterpret_cast<VkSwapchainKHR>(sc), nullptr);
-            return VK_ERROR_OUT_OF_DEVICE_MEMORY;
-        }
-
-        VkCommandPoolCreateInfo cpci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
-        cpci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-        cpci.queueFamilyIndex = d.queue_family;
         VkCommandBufferAllocateInfo cbai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        cbai.commandPool = sc->cmd_pool;
         cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
         cbai.commandBufferCount = 1;
         VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-        if (d.create_cmd_pool(dev, &cpci, nullptr, &sc->cmd_pool) != VK_SUCCESS ||
-            (cbai.commandPool = sc->cmd_pool, d.alloc_cmd(dev, &cbai, &sc->cmd_buf) != VK_SUCCESS) ||
-            d.create_fence(dev, &fci, nullptr, &sc->present_fence) != VK_SUCCESS) {
-            shim_vkDestroySwapchainKHR(dev, reinterpret_cast<VkSwapchainKHR>(sc), nullptr);
-            return VK_ERROR_INITIALIZATION_FAILED;
+
+        for (uint32_t s = 0; s < SwapchainObj::kStagingSlots; ++s) {
+            auto& slot = sc->staging[s];
+            if (d.create_buffer(dev, &bci, nullptr, &slot.buf) != VK_SUCCESS) {
+                shim_vkDestroySwapchainKHR(dev, reinterpret_cast<VkSwapchainKHR>(sc), nullptr);
+                return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+            }
+            VkMemoryRequirements breq{};
+            d.get_buf_req(dev, slot.buf, &breq);
+            uint32_t bmt = find_mem_type(
+                mem_props, breq.memoryTypeBits,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            if (bmt == UINT32_MAX) {
+                bmt = find_mem_type(mem_props, breq.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+            }
+            VkMemoryAllocateInfo bmai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+            bmai.allocationSize = breq.size;
+            bmai.memoryTypeIndex = bmt;
+            if (d.alloc_mem(dev, &bmai, nullptr, &slot.mem) != VK_SUCCESS ||
+                d.bind_buf_mem(dev, slot.buf, slot.mem, 0) != VK_SUCCESS ||
+                d.map_mem(dev, slot.mem, 0, bci.size, 0, &slot.mapped) != VK_SUCCESS ||
+                d.alloc_cmd(dev, &cbai, &slot.cmd_buf) != VK_SUCCESS ||
+                d.create_fence(dev, &fci, nullptr, &slot.fence) != VK_SUCCESS) {
+                shim_vkDestroySwapchainKHR(dev, reinterpret_cast<VkSwapchainKHR>(sc), nullptr);
+                return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+            }
         }
 
         *pSwapchain = reinterpret_cast<VkSwapchainKHR>(sc);
@@ -595,18 +643,16 @@ private:
         VkDevice dev, VkSwapchainKHR swapchain, const VkAllocationCallbacks* /*alloc*/) {
         if (!swapchain) return;
         auto* sc = reinterpret_cast<SwapchainObj*>(swapchain);
-        DeviceRec d{};
-        {
-            std::lock_guard<std::mutex> lk(global().mu_);
-            if (auto it = global().devices_.find(dev); it != global().devices_.end()) d = it->second;
-        }
+        const DeviceRec& d = sc->dev_rec;
         if (d.device) {
             if (d.wait_idle) d.wait_idle(dev);
-            if (sc->present_fence && d.destroy_fence) d.destroy_fence(dev, sc->present_fence, nullptr);
+            for (auto& slot : sc->staging) {
+                if (slot.fence && d.destroy_fence) d.destroy_fence(dev, slot.fence, nullptr);
+                if (slot.mapped && slot.mem && d.unmap_mem) d.unmap_mem(dev, slot.mem);
+                if (slot.buf && d.destroy_buffer) d.destroy_buffer(dev, slot.buf, nullptr);
+                if (slot.mem && d.free_mem) d.free_mem(dev, slot.mem, nullptr);
+            }
             if (sc->cmd_pool && d.destroy_cmd_pool) d.destroy_cmd_pool(dev, sc->cmd_pool, nullptr);
-            if (sc->staging_mapped && sc->staging_mem && d.unmap_mem) d.unmap_mem(dev, sc->staging_mem);
-            if (sc->staging_buf && d.destroy_buffer) d.destroy_buffer(dev, sc->staging_buf, nullptr);
-            if (sc->staging_mem && d.free_mem) d.free_mem(dev, sc->staging_mem, nullptr);
             for (auto img : sc->images) if (img && d.destroy_image) d.destroy_image(dev, img, nullptr);
             for (auto mem : sc->image_mems) if (mem && d.free_mem) d.free_mem(dev, mem, nullptr);
         }
@@ -629,7 +675,7 @@ private:
     }
 
     static VkResult VKAPI_CALL shim_vkAcquireNextImageKHR(
-        VkDevice dev, VkSwapchainKHR swapchain, uint64_t /*timeout*/,
+        VkDevice /*dev*/, VkSwapchainKHR swapchain, uint64_t /*timeout*/,
         VkSemaphore semaphore, VkFence fence, uint32_t* pImageIndex) {
         auto* sc = reinterpret_cast<SwapchainObj*>(swapchain);
         if (!sc || !pImageIndex || sc->images.empty()) return VK_ERROR_OUT_OF_DATE_KHR;
@@ -637,11 +683,7 @@ private:
         sc->next_index = (sc->next_index + 1u) % static_cast<uint32_t>(sc->images.size());
 
         if (semaphore != VK_NULL_HANDLE || fence != VK_NULL_HANDLE) {
-            DeviceRec d{};
-            {
-                std::lock_guard<std::mutex> lk(global().mu_);
-                if (auto it = global().devices_.find(dev); it != global().devices_.end()) d = it->second;
-            }
+            const DeviceRec& d = sc->dev_rec;
             if (d.queue_submit && d.default_queue) {
                 VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
                 if (semaphore != VK_NULL_HANDLE) {
@@ -662,18 +704,24 @@ private:
         const uint32_t idx = pInfo->pImageIndices[0];
         if (!sc || idx >= sc->images.size() || !sc->window) return VK_ERROR_OUT_OF_DATE_KHR;
 
-        DeviceRec d{};
-        {
-            std::lock_guard<std::mutex> lk(global().mu_);
-            if (auto it = global().devices_.find(sc->device); it != global().devices_.end()) d = it->second;
-        }
+        const DeviceRec& d = sc->dev_rec;
         if (!d.device) return VK_ERROR_DEVICE_LOST;
 
-        d.reset_fences(sc->device, 1, &sc->present_fence);
-        d.reset_cmd(sc->cmd_buf, 0);
+        const uint32_t cur_slot_idx = sc->staging_cursor;
+        const uint32_t prev_slot_idx = (cur_slot_idx + 1u) % SwapchainObj::kStagingSlots;
+        auto& cur = sc->staging[cur_slot_idx];
+        auto& prev = sc->staging[prev_slot_idx];
+
+        if (cur.in_flight) {
+            d.wait_fences(sc->device, 1, &cur.fence, VK_TRUE, 2'000'000'000ULL);
+            cur.in_flight = false;
+        }
+
+        d.reset_fences(sc->device, 1, &cur.fence);
+        d.reset_cmd(cur.cmd_buf, 0);
         VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        d.begin_cmd(sc->cmd_buf, &bi);
+        d.begin_cmd(cur.cmd_buf, &bi);
 
         VkImageMemoryBarrier b1{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
         b1.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
@@ -684,48 +732,72 @@ private:
         b1.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         b1.image = sc->images[idx];
         b1.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        d.cmd_barrier(sc->cmd_buf, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        d.cmd_barrier(cur.cmd_buf, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                       0, 0, nullptr, 0, nullptr, 1, &b1);
 
         VkBufferImageCopy region{};
         region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
         region.imageExtent = {sc->width, sc->height, 1};
-        d.cmd_copy_img_to_buf(sc->cmd_buf, sc->images[idx], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                              sc->staging_buf, 1, &region);
+        d.cmd_copy_img_to_buf(cur.cmd_buf, sc->images[idx], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                              cur.buf, 1, &region);
 
         VkImageMemoryBarrier b2 = b1;
         b2.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
         b2.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
         b2.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
         b2.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-        d.cmd_barrier(sc->cmd_buf, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+        d.cmd_barrier(cur.cmd_buf, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                       0, 0, nullptr, 0, nullptr, 1, &b2);
-        d.end_cmd(sc->cmd_buf);
+        d.end_cmd(cur.cmd_buf);
 
-        std::vector<VkPipelineStageFlags> wait_stages(pInfo->waitSemaphoreCount, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        VkPipelineStageFlags stack_stages[8];
+        std::vector<VkPipelineStageFlags> heap_stages;
+        VkPipelineStageFlags* wait_stages_ptr = nullptr;
+        if (pInfo->waitSemaphoreCount > 0) {
+            if (pInfo->waitSemaphoreCount <= 8) {
+                for (uint32_t i = 0; i < pInfo->waitSemaphoreCount; ++i) {
+                    stack_stages[i] = VK_PIPELINE_STAGE_TRANSFER_BIT;
+                }
+                wait_stages_ptr = stack_stages;
+            } else {
+                heap_stages.assign(pInfo->waitSemaphoreCount, VK_PIPELINE_STAGE_TRANSFER_BIT);
+                wait_stages_ptr = heap_stages.data();
+            }
+        }
         VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
         si.waitSemaphoreCount = pInfo->waitSemaphoreCount;
         si.pWaitSemaphores = pInfo->pWaitSemaphores;
-        si.pWaitDstStageMask = wait_stages.empty() ? nullptr : wait_stages.data();
+        si.pWaitDstStageMask = wait_stages_ptr;
         si.commandBufferCount = 1;
-        si.pCommandBuffers = &sc->cmd_buf;
-        if (d.queue_submit(queue, 1, &si, sc->present_fence) == VK_SUCCESS) {
-            d.wait_fences(sc->device, 1, &sc->present_fence, VK_TRUE, 2'000'000'000ULL);
+        si.pCommandBuffers = &cur.cmd_buf;
+        if (d.queue_submit(queue, 1, &si, cur.fence) == VK_SUCCESS) {
+            cur.in_flight = true;
+        }
+
+        // Overlap: while frame N transfers asynchronously on Adreno, post completed frame N-1
+        if (prev.in_flight) {
+            d.wait_fences(sc->device, 1, &prev.fence, VK_TRUE, 2'000'000'000ULL);
+            prev.in_flight = false;
             ANativeWindow_Buffer nw_buf{};
-            if (sc->staging_mapped && ANativeWindow_lock(sc->window, &nw_buf, nullptr) == 0) {
+            if (prev.mapped && ANativeWindow_lock(sc->window, &nw_buf, nullptr) == 0) {
                 const uint32_t copy_w = std::min<uint32_t>(sc->width, static_cast<uint32_t>(nw_buf.width));
                 const uint32_t copy_h = std::min<uint32_t>(sc->height, static_cast<uint32_t>(nw_buf.height));
-                const auto* src = static_cast<const uint8_t*>(sc->staging_mapped);
+                const auto* src = static_cast<const uint8_t*>(prev.mapped);
                 auto* dst = static_cast<uint8_t*>(nw_buf.bits);
                 const size_t src_pitch = static_cast<size_t>(sc->width) * 4;
                 const size_t dst_pitch = static_cast<size_t>(nw_buf.stride) * 4;
                 const size_t row_bytes = static_cast<size_t>(copy_w) * 4;
-                for (uint32_t y = 0; y < copy_h; ++y) {
-                    std::memcpy(dst + y * dst_pitch, src + y * src_pitch, row_bytes);
+                if (src_pitch == dst_pitch && row_bytes == src_pitch) {
+                    std::memcpy(dst, src, static_cast<size_t>(copy_h) * row_bytes);
+                } else {
+                    for (uint32_t y = 0; y < copy_h; ++y) {
+                        std::memcpy(dst + y * dst_pitch, src + y * src_pitch, row_bytes);
+                    }
                 }
                 ANativeWindow_unlockAndPost(sc->window);
             }
         }
+        sc->staging_cursor = prev_slot_idx;
         if (pInfo->pResults) pInfo->pResults[0] = VK_SUCCESS;
         return VK_SUCCESS;
     }
@@ -814,6 +886,7 @@ private:
     mutable std::mutex mu_;
     VulkanDriverHandle drv_{};
     bool ready_ = false;
+    std::atomic<uint32_t> max_render_height_{900u};
 };
 
 } // namespace mobiro::gfx

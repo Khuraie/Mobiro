@@ -338,10 +338,11 @@ Java_com_mobiro_runtime_MainActivity_nativeConfigureAndValidate(
             const int64_t work_ns = mobiro::gfx::DxvkInterop::global().pace_present();
             if (work_ns > 0) g_rt.balancer.report_frame_work(work_ns);
         });
-    mobiro_boot_log("Vulkan ICD loaded: %s (turnip=%d, dxvk_native=%d, turnip_err=%s)",
+    mobiro_boot_log("Vulkan ICD loaded: %s (turnip=%d, dxvk_native=%d, maxH=%u, turnip_err=%s)",
                     g_rt.vk_driver.loaded_path.c_str(),
                     g_rt.vk_driver.using_turnip ? 1 : 0,
                     dxvk_loaded ? 1 : 0,
+                    mobiro::gfx::TurnipWsiShim::global().max_render_height(),
                     g_rt.vk_driver.turnip_error.empty() ? "none" : g_rt.vk_driver.turnip_error.c_str());
 
     // 5. Reserve Win64 guest VA arena & initialize Box64 thunk bridge + memprot sync
@@ -501,10 +502,17 @@ extern "C" void android_main(struct android_app* app) {
                         g_rt.pe_image, g_rt.main_thread_env, g_rt.box64);
                     g_rt.guest_exit_code.store(res.exit_rax, std::memory_order_relaxed);
                     g_rt.guest_exited.store(true, std::memory_order_release);
-                    mobiro_boot_log("Guest exited ok=%d rax=0x%llx err=%s",
-                                    res.ok ? 1 : 0,
-                                    static_cast<unsigned long long>(res.exit_rax),
-                                    res.error.c_str());
+                    const auto pace = mobiro::gfx::DxvkInterop::global().pacing_stats();
+                    mobiro_boot_log(
+                        "Guest exited ok=%d rax=0x%llx frames=%llu drops=%llu avgMs=%.2f maxMs=%.2f trace=%s err=%s",
+                        res.ok ? 1 : 0,
+                        static_cast<unsigned long long>(res.exit_rax),
+                        static_cast<unsigned long long>(pace.frames_presented),
+                        static_cast<unsigned long long>(pace.frames_dropped),
+                        pace.avg_frame_ms(),
+                        pace.max_frame_ms(),
+                        g_rt.trace_enabled.load(std::memory_order_relaxed) ? "on" : "off",
+                        res.error.c_str());
                     const auto called = g_rt.box64.called_unresolved_imports();
                     for (size_t i = 0; i < called.size() && i < 32; ++i) {
                         mobiro_boot_log("  called missing IAT[%zu]: %s", i, called[i].c_str());

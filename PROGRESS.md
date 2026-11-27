@@ -6,6 +6,18 @@
 
 ## Log Entries
 
+### Increment 29 — M27: Async Double-Buffered Turnip WSI Present Pipeline, 900p Hardware-Scaled Swapchain Cap & Boot-Log Frame Pacing Telemetry (2026-11-27)
+- **Status:** Implemented & verified (local MSVC 2022 tests + retail `--verify-byof` + GitHub Actions CI + bundled ARM64 APK)
+- **Changes:**
+  - Eliminated per-frame CPU-GPU pipeline stalls and heap allocations in `TurnipWsiShim` (`app/src/main/cpp/gfx/turnip_wsi_shim.hpp`):
+    - Upgraded `SwapchainObj` to **double-buffered async UMA staging slots** (`kStagingSlots = 2`, per-slot buffer/cmdbuf/fence) over a guaranteed `>=3`-image swapchain so frame `N` transfers asynchronously on Adreno while frame `N-1` posts to `ANativeWindow`.
+    - Replaced per-present `std::vector<VkPipelineStageFlags>` heap allocation with a zero-alloc `VkPipelineStageFlags[8]` stack fast path, cached `DeviceRec` inside `SwapchainObj` to eliminate 2 mutex locks + 2 hash lookups per frame, and collapsed row-by-row `memcpy` into a single contiguous `memcpy` when `stride == width`.
+    - Added aspect-preserving `compute_scaled_swapchain_extent()` (default `900p` cap, configurable via `MOBIRO_MAX_RENDER_HEIGHT`, `0` = native panel) so 1312p/1440p panels render at crisp `1954×900` (>2.1× lower GPU fill-rate & staging bandwidth) while SurfaceFlinger hardware-scales to native resolution via `ANativeWindow_setBuffersGeometry`.
+  - Logged exact `frames`, `drops`, `avgMs`, `maxMs`, `trace`, and `maxH` directly into `mobiro_boot.log` (`ANDROID_LOG_WARN`) on guest exit in `app/src/main/cpp/runtime_main.cpp` so OEM logcat filters never hide 60 FPS telemetry.
+  - Added `test_m27_turnip_wsi_scaled_extent` in `tests/test_core.cpp` (27/27 suites passing).
+
+---
+
 ### Increment 28 — M26: Clean-Room Public-NDK Turnip Vulkan WSI Shim (`VK_KHR_android_surface`/`VK_KHR_swapchain`), DXVK 3.2+ on Mesa Turnip 26.99.99 & Live 2848×1312 60 FPS Verification on Snapdragon 8 Gen 2 (2026-11-27)
 - **Status:** Implemented & **verified LIVE on Honor Magic5 Pro (`PGT-AN10`, Snapdragon 8 Gen 2 / Adreno 740, Android 16)** (`Run 45959634972`)
 - **Changes:**

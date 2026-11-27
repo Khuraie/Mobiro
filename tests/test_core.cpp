@@ -2770,6 +2770,32 @@ void test_m26_turnip_wsi_extension_filter() {
     assert(std::strcmp(fd[1], "VK_EXT_depth_clip_enable") == 0);
 }
 
+void test_m27_turnip_wsi_scaled_extent() {
+    // High-DPI Honor Magic5 Pro panel (2848x1312) capped to 900p preserves aspect ratio & even dims
+    const auto s900 = mobiro::gfx::compute_scaled_swapchain_extent(2848, 1312, 900);
+    assert(s900.second == 900);
+    assert((s900.first & 1u) == 0 && (s900.second & 1u) == 0);
+    assert(s900.first == 1954);
+    // Idempotent once already at <= max_height
+    const auto idem = mobiro::gfx::compute_scaled_swapchain_extent(s900.first, s900.second, 900);
+    assert(idem.first == 1954 && idem.second == 900);
+    // 720p panel untouched at 900p cap; max_height=0 keeps native resolution
+    const auto p720 = mobiro::gfx::compute_scaled_swapchain_extent(1280, 720, 900);
+    assert(p720.first == 1280 && p720.second == 720);
+    const auto nat = mobiro::gfx::compute_scaled_swapchain_extent(2848, 1312, 0);
+    assert(nat.first == 2848 && nat.second == 1312);
+    // Zero fallback
+    const auto z = mobiro::gfx::compute_scaled_swapchain_extent(0, 0, 900);
+    assert(z.first == 1280 && z.second == 720);
+    // Setter / getter round-trip on global shim
+    auto& shim = mobiro::gfx::TurnipWsiShim::global();
+    const uint32_t orig = shim.max_render_height();
+    assert(orig == 900);
+    shim.set_max_render_height(720);
+    assert(shim.max_render_height() == 720);
+    shim.set_max_render_height(orig);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -2865,6 +2891,7 @@ int main(int argc, char** argv) {
     test_m24_set_resource_min_lod_xmm2_and_frame_ms_stats();
     test_m25_lockfree_present_raw_hook();
     test_m26_turnip_wsi_extension_filter();
+    test_m27_turnip_wsi_scaled_extent();
     std::cout << "All Mobiro core unit tests passed.\n";
     return 0;
 }
