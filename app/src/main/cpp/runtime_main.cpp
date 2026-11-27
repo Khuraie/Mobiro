@@ -10,6 +10,7 @@
 #include "gfx/pipeline_cache_warmer.hpp"
 #include "gfx/touch_overlay_vk.hpp"
 #include "gfx/turnip_loader.hpp"
+#include "gfx/turnip_wsi_shim.hpp"
 #include "input/input_router.hpp"
 #include "input/touch_controller.hpp"
 #include "sched/thread_balancer.hpp"
@@ -163,10 +164,15 @@ void process_game_activity_input(android_app* app) {
 
 } // namespace
 
-// Exported C symbols resolved via dlsym(RTLD_DEFAULT) by DXVK's AndroidWsiDriver / Vulkan HUD hook
+// Exported C symbols resolved via dlsym(RTLD_DEFAULT) by DXVK's AndroidWsiDriver / Vulkan loader / HUD hook
 extern "C" __attribute__((visibility("default")))
 void* mobiro_get_android_native_window() {
     return mobiro::gfx::DxvkInterop::global().surface().native_window;
+}
+
+extern "C" __attribute__((visibility("default")))
+void* mobiro_get_vk_instance_proc_addr() {
+    return mobiro::gfx::TurnipWsiShim::global().get_instance_proc_addr_fn();
 }
 
 extern "C" __attribute__((visibility("default")))
@@ -320,8 +326,9 @@ Java_com_mobiro_runtime_MainActivity_nativeConfigureAndValidate(
         unsetenv("DXVK_LOG_PATH");
     }
 
-    // 4. Load Mesa Turnip ICD (with graceful fallback to system Vulkan) + native AArch64 DXVK
+    // 4. Load Mesa Turnip ICD (with graceful fallback to system Vulkan) + public-NDK WSI shim + native DXVK
     g_rt.vk_driver = mobiro::gfx::load_vulkan_driver(lib_dir);
+    mobiro::gfx::TurnipWsiShim::global().initialize(g_rt.vk_driver);
     g_rt.touch_overlay.attach_vulkan_loader(g_rt.vk_driver.get_instance_proc_addr);
     const bool dxvk_loaded = mobiro::gfx::DxvkInterop::global().load_native_libraries(lib_dir);
     g_rt.dxvk_loaded.store(dxvk_loaded, std::memory_order_relaxed);
@@ -512,5 +519,6 @@ extern "C" void android_main(struct android_app* app) {
     g_rt.box64.shutdown();
     mobiro::audio::AAudioXAudioBridge::global().stop();
     mobiro::gfx::DxvkInterop::global().unload();
+    mobiro::gfx::TurnipWsiShim::global().shutdown();
     mobiro::gfx::unload_vulkan_driver(g_rt.vk_driver);
 }

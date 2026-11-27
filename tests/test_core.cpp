@@ -13,6 +13,7 @@
 #include "gfx/dxvk_interop.hpp"
 #include "gfx/pipeline_cache_warmer.hpp"
 #include "gfx/touch_overlay_vk.hpp"
+#include "gfx/turnip_wsi_shim.hpp"
 #include "cpu_mem/win32_ext_shims.hpp"
 #include "input/input_router.hpp"
 #include "input/touch_controller.hpp"
@@ -2750,6 +2751,25 @@ void test_m25_lockfree_present_raw_hook() {
     mobiro::gfx::D3D11ComBridge::dispatch_slot<2>(&emu);
 }
 
+void test_m26_turnip_wsi_extension_filter() {
+    const char* inst_exts[] = {
+        "VK_KHR_surface", "VK_KHR_android_surface", "VK_EXT_debug_utils",
+        "VK_KHR_get_surface_capabilities2", "VK_KHR_external_memory_capabilities"
+    };
+    const auto fi = mobiro::gfx::filter_turnip_wsi_extensions(inst_exts, 5, true);
+    assert(fi.size() == 2);
+    assert(std::strcmp(fi[0], "VK_EXT_debug_utils") == 0);
+    assert(std::strcmp(fi[1], "VK_KHR_external_memory_capabilities") == 0);
+
+    const char* dev_exts[] = {
+        "VK_KHR_swapchain", "VK_EXT_robustness2", "VK_KHR_swapchain_mutable_format", "VK_EXT_depth_clip_enable"
+    };
+    const auto fd = mobiro::gfx::filter_turnip_wsi_extensions(dev_exts, 4, false);
+    assert(fd.size() == 2);
+    assert(std::strcmp(fd[0], "VK_EXT_robustness2") == 0);
+    assert(std::strcmp(fd[1], "VK_EXT_depth_clip_enable") == 0);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -2844,6 +2864,7 @@ int main(int argc, char** argv) {
     test_m23_d3d11_hot_loop_and_hs_ds_so_unwrap();
     test_m24_set_resource_min_lod_xmm2_and_frame_ms_stats();
     test_m25_lockfree_present_raw_hook();
+    test_m26_turnip_wsi_extension_filter();
     std::cout << "All Mobiro core unit tests passed.\n";
     return 0;
 }

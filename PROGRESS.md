@@ -6,6 +6,16 @@
 
 ## Log Entries
 
+### Increment 28 — M26: Clean-Room Public-NDK Turnip Vulkan WSI Shim (`VK_KHR_android_surface`/`VK_KHR_swapchain`) & DXVK Loader Binding (2026-11-27)
+- **Status:** Implemented & verified (live Honor Magic5 Pro Android 16 diagnosis + local MSVC tests + GitHub Actions DXVK rebuild + live hardware run)
+- **Changes:**
+  - Verified live on Honor Magic5 Pro (Snapdragon 8 Gen 2 / Android 16): patched Mesa Turnip (`libvulkan_freedreno.so`) now loads natively via Android HAL `HMI` (`turnip=1, turnip_err=none`), while Qualcomm's OEM Adreno 740 driver (`0.676.3`) was skipped by DXVK 3.2+ for lacking `shaderInt64`.
+  - Implemented clean-room `TurnipWsiShim` (`app/src/main/cpp/gfx/turnip_wsi_shim.hpp`) layered directly over Mesa Turnip's `HMI` Vulkan 1.3 ICD using 100% public Android NDK `ANativeWindow` APIs (zero root / zero linker-namespace bypasses): advertises `VK_KHR_surface`, `VK_KHR_android_surface`, and `VK_KHR_swapchain`, allocates Turnip device-local swapchain images + UMA host-coherent staging copy, and presents via `ANativeWindow_lock`/`ANativeWindow_unlockAndPost`.
+  - Exported `mobiro_get_vk_instance_proc_addr()` from `runtime_main.cpp` and patched DXVK's `src/vulkan/vulkan_loader.cpp` (`scripts/patch_dxvk_android_wsi.py`) to bind directly to Mobiro's Turnip WSI loader before falling back to system `libvulkan.so`.
+  - Added `test_m26_turnip_wsi_extension_filter` in `tests/test_core.cpp` (26/26 suites passing).
+
+---
+
 ### Increment 27 — M25: Lock-Free `Present` Hook, Full XAudio2 + D3D11 Dynamic Buffer Self-Test & One-Command `-SelfTest` ADB Runner (2026-11-27)
 - **Status:** Implemented & verified (local MSVC 2022 tests + GitHub Actions CI + bundled ARM64 APK)
 - **Changes:**

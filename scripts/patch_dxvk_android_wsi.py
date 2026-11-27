@@ -96,7 +96,32 @@ def main() -> int:
         "s_mobiroTouchHud",
     )
 
-    print(f"[Mobiro] Patched DXVK Android ANativeWindow WSI + Touch HUD in {dxvk}")
+    # Bind DXVK's Vulkan loader to Mobiro's Turnip WSI shim when running on Android
+    vk_loader = dxvk / "src" / "vulkan" / "vulkan_loader.cpp"
+    insert_after(
+        vk_loader,
+        '#include "../util/util_win32_compat.h"\n',
+        '#if defined(DXVK_WSI_ANDROID)\n#include <dlfcn.h>\n#endif\n',
+        "DXVK_WSI_ANDROID",
+    )
+    insert_after(
+        vk_loader,
+        "  static std::pair<HMODULE, PFN_vkGetInstanceProcAddr> loadVulkanLibrary() {\n",
+        "#if defined(DXVK_WSI_ANDROID)\n"
+        "    using PfnMobiroGetVk = PFN_vkGetInstanceProcAddr (*)();\n"
+        "    if (auto pfnMobiro = reinterpret_cast<PfnMobiroGetVk>(\n"
+        "            dlsym(RTLD_DEFAULT, \"mobiro_get_vk_instance_proc_addr\"))) {\n"
+        "      if (auto proc = pfnMobiro()) {\n"
+        "        Logger::info(str::format(\"Vulkan: Using Mobiro Turnip WSI vkGetInstanceProcAddr @ 0x\",\n"
+        "                                 std::hex, reinterpret_cast<uintptr_t>(proc)));\n"
+        "        return std::make_pair(HMODULE(nullptr), proc);\n"
+        "      }\n"
+        "    }\n"
+        "#endif\n",
+        "mobiro_get_vk_instance_proc_addr",
+    )
+
+    print(f"[Mobiro] Patched DXVK Android ANativeWindow WSI + Turnip Loader + Touch HUD in {dxvk}")
     return 0
 
 

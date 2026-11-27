@@ -14,6 +14,10 @@ using PfnGetInstanceProcAddr = void* (*)(void* instance, const char* name);
 struct VulkanDriverHandle {
     void* dl_handle = nullptr;
     PfnGetInstanceProcAddr get_instance_proc_addr = nullptr;
+    void* hal_device = nullptr;
+    int (*hal_close)(void*) = nullptr;
+    void* hal_enum_inst_ext = nullptr;
+    void* hal_create_instance = nullptr;
     bool using_turnip = false;
     std::string loaded_path;
     std::string turnip_error;
@@ -75,7 +79,10 @@ inline VulkanDriverHandle load_vulkan_driver(const std::string& native_lib_dir) 
                 if (hmi->methods->open(hmi, "vk0", &dev) == 0 && dev) {
                     auto* vk_dev = reinterpret_cast<HwVulkanDevice*>(dev);
                     fn = vk_dev->get_instance_proc_addr;
-                    if (vk_dev->close) vk_dev->close(dev);
+                    res.hal_device = dev;
+                    res.hal_close = vk_dev->close;
+                    res.hal_enum_inst_ext = vk_dev->enumerate_instance_extension_properties;
+                    res.hal_create_instance = vk_dev->create_instance;
                 }
             }
         }
@@ -111,12 +118,19 @@ inline VulkanDriverHandle load_vulkan_driver(const std::string& native_lib_dir) 
 
 inline void unload_vulkan_driver(VulkanDriverHandle& h) {
 #if defined(__linux__) || defined(__ANDROID__)
+    if (h.hal_device && h.hal_close) {
+        h.hal_close(h.hal_device);
+        h.hal_device = nullptr;
+        h.hal_close = nullptr;
+    }
     if (h.dl_handle) {
         dlclose(h.dl_handle);
         h.dl_handle = nullptr;
     }
 #endif
     h.get_instance_proc_addr = nullptr;
+    h.hal_enum_inst_ext = nullptr;
+    h.hal_create_instance = nullptr;
     h.using_turnip = false;
 }
 
