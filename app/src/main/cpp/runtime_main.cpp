@@ -49,6 +49,9 @@ struct MobiroRuntimeState {
     std::atomic<bool> configured{false};
     std::atomic<bool> dxvk_loaded{false};
     std::atomic<bool> guest_started{false};
+    std::atomic<bool> guest_exited{false};
+    std::atomic<uint64_t> guest_exit_code{0};
+    std::atomic<bool> trace_enabled{false};
     std::thread guest_thread;
     std::mutex log_mu;
     std::string boot_log_path;
@@ -283,13 +286,23 @@ Java_com_mobiro_runtime_MainActivity_nativeConfigureAndValidate(
     setenv("BOX64_DYNAREC_ALIGNED_ATOMICS", "1", 0);
     setenv("BOX64_DYNAREC_WAIT", "1", 0);
     setenv("BOX64_NOBANNER", "1", 0);
-    const std::string box64_log = (std::filesystem::path(game_dir).parent_path() / "mobiro_box64.log").string();
-    const std::string api_log = (std::filesystem::path(game_dir).parent_path() / "mobiro_api.log").string();
-    setenv("BOX64_TRACE_FILE", box64_log.c_str(), 1);
-    setenv("BOX64_LOG", "1", 0);
-    setenv("BOX64_SHOWBT", "1", 0);
-    setenv("BOX64_SHOWSEGV", "1", 0);
-    setenv("MOBIRO_API_TRACE_FILE", api_log.c_str(), 1);
+    // Gate verbose Box64 / Win32 API tracing behind an opt-in marker file so default runs have zero logging overhead for locked 60 FPS
+    const auto parent_dir = std::filesystem::path(game_dir).parent_path();
+    const bool trace_on = std::filesystem::exists(parent_dir / "mobiro_trace.enable", ec);
+    g_rt.trace_enabled.store(trace_on, std::memory_order_relaxed);
+    if (trace_on) {
+        const std::string box64_log = (parent_dir / "mobiro_box64.log").string();
+        const std::string api_log = (parent_dir / "mobiro_api.log").string();
+        setenv("BOX64_TRACE_FILE", box64_log.c_str(), 1);
+        setenv("BOX64_LOG", "1", 1);
+        setenv("BOX64_SHOWBT", "1", 1);
+        setenv("BOX64_SHOWSEGV", "1", 1);
+        setenv("MOBIRO_API_TRACE_FILE", api_log.c_str(), 1);
+    } else {
+        setenv("BOX64_LOG", "0", 1);
+        unsetenv("BOX64_TRACE_FILE");
+        unsetenv("MOBIRO_API_TRACE_FILE");
+    }
 
     // 4. Load Mesa Turnip ICD (with graceful fallback to system Vulkan) + native AArch64 DXVK
     g_rt.vk_driver = mobiro::gfx::load_vulkan_driver(lib_dir);
@@ -375,7 +388,14 @@ Java_com_mobiro_runtime_MainActivity_nativeGetDiagnosticsSummary(JNIEnv* env, jo
         " missingCalled=" + std::to_string(called.size()) +
         " fps=" + std::to_string(g_rt.target_fps.load(std::memory_order_relaxed)) +
         " frames=" + std::to_string(pace.frames_presented) +
-        " drops=" + std::to_string(pace.frames_dropped);
+        " drops=" + std::to_string(pace.frames_dropped) +
+        " trace=" + (g_rt.trace_enabled.load(std::memory_order_relaxed) ? "on" : "off");
+    if (g_rt.guest_exited.load(std::memory_order_acquire)) {
+        char hex[32];
+        std::snprintf(hex, sizeof(hex), " exit=0x%llx",
+                      static_cast<unsigned long long>(g_rt.guest_exit_code.load(std::memory_order_relaxed)));
+        summary += hex;
+    }
     return env->NewStringUTF(summary.c_str());
 }
 
@@ -450,6 +470,8 @@ extern "C" void android_main(struct android_app* app) {
                                     static_cast<unsigned long long>(g_rt.pe_image.entry_point));
                     auto res = mobiro::cpu::GuestExecutor::run_entry(
                         g_rt.pe_image, g_rt.main_thread_env, g_rt.box64);
+                    g_rt.guest_exit_code.store(res.exit_rax, std::memory_order_relaxed);
+                    g_rt.guest_exited.store(true, std::memory_order_release);
                     mobiro_boot_log("Guest exited ok=%d rax=0x%llx err=%s",
                                     res.ok ? 1 : 0,
                                     static_cast<unsigned long long>(res.exit_rax),

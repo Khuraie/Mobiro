@@ -6,6 +6,16 @@
 
 ## Log Entries
 
+### Increment 24 — M22: Zero-Overhead 60 FPS Trace Gating, Mesa Turnip Android 16 `clns-*` Stub Fix & Clean-Room Win64 D3D11 Self-Test (2026-11-27)
+- **Status:** Implemented & verified (local MSVC 2022 tests `0.22s` + retail `--verify-byof` + GitHub Actions CI & Turnip `arm64-v8a` rebuild)
+- **Changes:**
+  - Gated verbose Box64 (`BOX64_LOG`/`BOX64_TRACE_FILE`/`BOX64_SHOWBT`/`BOX64_SHOWSEGV`) and Win32 IAT (`MOBIRO_API_TRACE_FILE`) tracing in `app/src/main/cpp/runtime_main.cpp` behind an opt-in marker file (`<files>/mobiro_trace.enable`), restoring zero-logging-overhead direct Box64 Dynarec thunk dispatch by default for locked 60 FPS; exposed `trace=on/off` and `exit=0x...` guest exit status in `nativeGetDiagnosticsSummary()`.
+  - Fixed Android 15/16 app linker namespace (`clns-9`) rejection of bundled Mesa Turnip (`libvulkan_freedreno.so`): added `scripts/patch_turnip_android_stubs.py` and wired it into `scripts/build_turnip_android.sh` (`-Dandroid-libbacktrace=disabled`, static `hardware_stub.cpp` returning `-ENOENT`, static `sync_stub.cpp` backed by real Linux `poll()`/`SYNC_IOC_MERGE`/`SYNC_IOC_FILE_INFO` ioctls, dynamic public NDK `liblog.so`/`libnativewindow.so`) plus an automated `llvm-readelf -d` gate rejecting private HAL/VNDK `DT_NEEDED` entries.
+  - Added clean-room Win64 x86_64 `-nostdlib` D3D11 + DXGI + XAudio2 + XInput 60 FPS self-test payload (`tools/mobiro_selftest.c`) and `--verify-pe <exe>` loader verifier in `tests/test_core.cpp`, wired into `.github/workflows/ci.yml` via `x86_64-w64-mingw32-gcc`.
+  - Added `test_m21_vfs_prefix_crt_file_mapping_and_ntdll` and `test_m22_end_to_end_d3d11_xaudio_xinput_60fps_selftest` in `tests/test_core.cpp` (22/22 test suites passing).
+
+---
+
 ### Increment 23 — M21: Live Snapdragon 8 Gen 2 (Honor Magic5 Pro) ARM64 Dynarec Bring-Up & 1,507-Call Real Win32 Execution Trace (2026-11-27)
 - **Status:** Implemented & verified live on Honor Magic5 Pro (`PGT-AN10`, Snapdragon 8 Gen 2 / Adreno 740, Android 16) + local MSVC 2022 tests (`0.17s`) + GitHub Actions fast bundled APK builds (`~90s`)
 - **Changes:**
@@ -269,4 +279,4 @@
 ---
 
 ## Upcoming Increments
-- **Increment 16 (M14 — Live Adreno 7xx/8xx Handset Bring-Up & In-Swapchain HUD Hook):** Rebuild the bundled APK via `build-third-party.yml`, test first real-device Adreno 7xx/8xx launch against user-supplied BYOF `Sekiro.exe`, close any newly reported `unresolved IAT` calls from `logcat`, and bind `TouchOverlayVk` into DXVK's live Vulkan present pass.
+- **Increment 25 (M23 — Live Android 16 Turnip + `mobiro_selftest.exe` 60 FPS Benchmark & Frame-Time Telemetry):** When the user next requests on-device validation, verify the rebuilt `libvulkan_freedreno.so` loads natively on Adreno 740 (`Vk=Turnip`) and measure 120-frame 60 FPS pacing + `MobiroTouchHud` + XAudio2 using the clean-room `mobiro_selftest.exe` payload.

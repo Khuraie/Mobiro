@@ -2278,6 +2278,293 @@ void test_m19_win64_static_tls_pointer_isolation() {
     bridge.shutdown();
 }
 
+void test_m21_vfs_prefix_crt_file_mapping_and_ntdll() {
+    const fs::path root = fs::temp_directory_path() / "mobiro_m21_vfs_test";
+    fs::remove_all(root);
+    fs::create_directories(root);
+    {
+        std::ofstream f1(root / "Sekiro.exe", std::ios::binary);
+        f1 << "MZ";
+        std::ofstream f2(root / "Data1.bdt", std::ios::binary);
+        f2 << "DATA1";
+    }
+
+    mobiro::validator::VfsMapper vfs;
+    assert(vfs.index_root(root.string()));
+
+    // 1. VfsMapper::strip_prefix: canonical virtual game root + Win32 extended prefixes
+    std::string host;
+    assert(vfs.resolve("C:\\Sekiro\\Sekiro.exe", host));
+    assert(fs::path(host).filename() == "Sekiro.exe");
+    assert(vfs.resolve("\\\\?\\C:\\Sekiro\\Data1.bdt", host));
+    assert(fs::path(host).filename() == "Data1.bdt");
+    assert(vfs.resolve("sekiro/Data1.bdt", host));
+
+    mobiro::mem::GuestArena arena;
+    assert(arena.reserve(0x0000000100000000ULL, 128ULL * 1024 * 1024));
+    mobiro::cpu::Box64Bridge bridge;
+    assert(bridge.initialize(&arena, &vfs));
+
+    mobiro::cpu::Win64ThreadEnv tenv{};
+    assert(tenv.init_main_thread(arena, 0x140000000ULL, 8, 2000, 1));
+    bridge.set_main_thread_env(&tenv);
+
+    // 2. GuestHeap-backed msvcrt.dll calloc/realloc/free + vsprintf/snprintf
+    x64emu_t emu{};
+    emu.gs_base = reinterpret_cast<uintptr_t>(tenv.teb);
+    emu.rcx = 8;
+    emu.rdx = 16;
+    assert(bridge.invoke_thunk("msvcrt.dll", "calloc", &emu) && emu.rax != 0);
+    const uint64_t mem = emu.rax;
+    for (int i = 0; i < 128; ++i) assert(reinterpret_cast<const uint8_t*>(mem)[i] == 0);
+
+    emu = {}; emu.rcx = mem; emu.rdx = 256;
+    assert(bridge.invoke_thunk("msvcrt.dll", "realloc", &emu) && emu.rax != 0);
+    const uint64_t mem2 = emu.rax;
+    emu = {}; emu.rcx = mem2;
+    assert(bridge.invoke_thunk("msvcrt.dll", "free", &emu));
+
+    char fmt_buf[128]{};
+    uint64_t va_args[8] = {reinterpret_cast<uint64_t>("Sekiro"), 60ULL, 0x35ULL, 0, 0, 0, 0, 0};
+    emu = {};
+    emu.rcx = reinterpret_cast<uint64_t>(fmt_buf);
+    emu.rdx = reinterpret_cast<uint64_t>("%s=%d(0x%x)");
+    emu.r8  = reinterpret_cast<uint64_t>(va_args);
+    assert(bridge.invoke_thunk("msvcrt.dll", "vsprintf", &emu) && emu.rax == 15);
+    assert(std::strcmp(fmt_buf, "Sekiro=60(0x35)") == 0);
+
+    // 3. FileMappingStore: CreateFileMappingA -> OpenFileMappingA -> MapViewOfFile
+    uint64_t fake_stack[16]{};
+    const char* map_name = "Local\\MobiroM21Shared";
+    fake_stack[5] = 4096ULL; // [RSP+0x28]: dwMaximumSizeLow
+    fake_stack[6] = reinterpret_cast<uint64_t>(map_name); // [RSP+0x30]: lpName
+    emu = {};
+    emu.rsp = reinterpret_cast<uint64_t>(fake_stack);
+    emu.r9  = 0ULL; // dwMaximumSizeHigh
+    assert(bridge.invoke_thunk("kernel32.dll", "CreateFileMappingA", &emu) && emu.rax != 0);
+    const uint64_t hmap = emu.rax;
+
+    emu = {}; emu.r8 = reinterpret_cast<uint64_t>(map_name);
+    assert(bridge.invoke_thunk("kernel32.dll", "OpenFileMappingA", &emu) && emu.rax == hmap);
+
+    emu = {}; emu.rcx = hmap; emu.r8 = 0; emu.r9 = 0;
+    assert(bridge.invoke_thunk("kernel32.dll", "MapViewOfFile", &emu) && emu.rax != 0);
+    auto* mapped = reinterpret_cast<uint32_t*>(emu.rax);
+    *mapped = 0x5E414243u;
+    emu = {}; emu.rcx = hmap; emu.r8 = 0; emu.r9 = 0;
+    assert(bridge.invoke_thunk("kernel32.dll", "MapViewOfFile", &emu));
+    assert(*reinterpret_cast<uint32_t*>(emu.rax) == 0x5E414243u);
+
+    emu = {}; emu.gs_base = reinterpret_cast<uintptr_t>(tenv.teb);
+    emu.r8 = reinterpret_cast<uint64_t>("Local\\DoesNotExist");
+    assert(bridge.invoke_thunk("kernel32.dll", "OpenFileMappingA", &emu) && emu.rax == 0);
+    assert(tenv.teb->last_error == 2u); // ERROR_FILE_NOT_FOUND
+
+    // 4. IsBadReadPtr, OpenProcess(0) -> NULL, shlwapi PathFileExistsA, advapi32 SystemFunction036
+    emu = {}; emu.rcx = 0ULL;
+    assert(bridge.invoke_thunk("kernel32.dll", "IsBadReadPtr", &emu) && emu.rax == 1ULL);
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>(fmt_buf);
+    assert(bridge.invoke_thunk("kernel32.dll", "IsBadReadPtr", &emu) && emu.rax == 0ULL);
+
+    emu = {}; emu.gs_base = reinterpret_cast<uintptr_t>(tenv.teb); emu.r8 = 0ULL;
+    assert(bridge.invoke_thunk("kernel32.dll", "OpenProcess", &emu) && emu.rax == 0ULL);
+    assert(tenv.teb->last_error == 87u); // ERROR_INVALID_PARAMETER
+    emu = {}; emu.r8 = 1234ULL;
+    assert(bridge.invoke_thunk("kernel32.dll", "OpenProcess", &emu) && emu.rax == ~0ULL);
+
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>("C:\\Sekiro\\Sekiro.exe");
+    assert(bridge.invoke_thunk("shlwapi.dll", "PathFileExistsA", &emu) && emu.rax == 1ULL);
+    uint8_t rnd[16]{};
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>(rnd); emu.rdx = sizeof(rnd);
+    assert(bridge.invoke_thunk("advapi32.dll", "SystemFunction036", &emu) && emu.rax == 1ULL);
+
+    // 5. ntdll.dll NtSetInformationThread, NtQueryPerformanceCounter, RtlGetVersion, RtlInitUnicodeString
+    emu = {};
+    assert(bridge.invoke_thunk("ntdll.dll", "NtSetInformationThread", &emu) && emu.rax == 0ULL);
+    int64_t qpc = 0, qpf = 0;
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>(&qpc); emu.rdx = reinterpret_cast<uint64_t>(&qpf);
+    assert(bridge.invoke_thunk("ntdll.dll", "NtQueryPerformanceCounter", &emu) && emu.rax == 0ULL);
+    assert(qpc > 0 && qpf == 10'000'000LL);
+
+    uint32_t ver[16]{};
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>(ver);
+    assert(bridge.invoke_thunk("ntdll.dll", "RtlGetVersion", &emu) && emu.rax == 0ULL);
+    assert(ver[1] == 10u && ver[3] == 19045u);
+
+    uint8_t ustr[16]{};
+    const uint16_t src16[] = {'M','o','b','i','r','o',0};
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>(ustr); emu.rdx = reinterpret_cast<uint64_t>(src16);
+    assert(bridge.invoke_thunk("ntdll.dll", "RtlInitUnicodeString", &emu) && emu.rax == 0ULL);
+    uint16_t ulen = 0;
+    std::memcpy(&ulen, ustr, 2);
+    assert(ulen == 12u);
+
+    // 6. Stub cache deduplication: resolving same import twice returns identical onebridge_t address
+    const uintptr_t s1 = bridge.resolve_import("ntdll.dll", "NtSetInformationThread");
+    const uintptr_t s2 = bridge.resolve_import("ntdll.dll", "NtSetInformationThread");
+    assert(s1 != 0 && s1 == s2);
+
+    bridge.shutdown();
+    fs::remove_all(root);
+}
+
+void test_m22_end_to_end_d3d11_xaudio_xinput_60fps_selftest() {
+    mobiro::mem::GuestArena arena;
+    assert(arena.reserve(0x0000000100000000ULL, 128ULL * 1024 * 1024));
+    mobiro::validator::VfsMapper vfs;
+    mobiro::cpu::Box64Bridge bridge;
+    assert(bridge.initialize(&arena, &vfs));
+
+    // Fake native DXVK COM objects matching D3D11/DXGI vtable layouts used by tools/mobiro_selftest.c
+    struct FakeObj { void** vtbl; };
+    static FakeObj g_bb{}, g_rtv{}, g_sc{}, g_dev{}, g_ctx{};
+    static void* g_om_bound_rtv = nullptr;
+    static float g_cleared_rgba[4] = {};
+    static uint32_t g_presents = 0;
+    g_om_bound_rtv = nullptr;
+    std::memset(g_cleared_rgba, 0, sizeof(g_cleared_rgba));
+    g_presents = 0;
+
+    static auto release_fn = +[](void*) -> uint32_t { return 0u; };
+    static auto sc_present = +[](void*, uint32_t, uint32_t) -> int32_t { ++g_presents; return 0; };
+    static auto sc_get_buf = +[](void*, uint32_t, const void*, void** out) -> int32_t {
+        if (out) *out = &g_bb;
+        return 0;
+    };
+    static auto dev_create_rtv = +[](void*, void* res, const void*, void** out) -> int32_t {
+        assert(res == &g_bb);
+        if (out) *out = &g_rtv;
+        return 0;
+    };
+    static auto ctx_om_set_rt = +[](void*, uint32_t n, void* const* rtvs, void*) {
+        assert(n == 1 && rtvs && rtvs[0] == &g_rtv);
+        g_om_bound_rtv = rtvs[0];
+    };
+    static auto ctx_clear_rtv = +[](void*, void* rtv, const float* rgba) {
+        assert(rtv == &g_rtv && rgba);
+        std::memcpy(g_cleared_rgba, rgba, sizeof(g_cleared_rgba));
+    };
+
+    static void* bb_vtbl[14]{};
+    bb_vtbl[2] = reinterpret_cast<void*>(release_fn);
+    g_bb.vtbl = bb_vtbl;
+    g_rtv.vtbl = bb_vtbl;
+
+    static void* sc_vtbl[18]{};
+    sc_vtbl[2] = reinterpret_cast<void*>(release_fn);
+    sc_vtbl[8] = reinterpret_cast<void*>(sc_present);
+    sc_vtbl[9] = reinterpret_cast<void*>(sc_get_buf);
+    g_sc.vtbl = sc_vtbl;
+
+    static void* dev_vtbl[43]{};
+    dev_vtbl[2] = reinterpret_cast<void*>(release_fn);
+    dev_vtbl[9] = reinterpret_cast<void*>(dev_create_rtv);
+    g_dev.vtbl = dev_vtbl;
+
+    static void* ctx_vtbl[115]{};
+    ctx_vtbl[2]  = reinterpret_cast<void*>(release_fn);
+    ctx_vtbl[33] = reinterpret_cast<void*>(ctx_om_set_rt);
+    ctx_vtbl[50] = reinterpret_cast<void*>(ctx_clear_rtv);
+    g_ctx.vtbl = ctx_vtbl;
+
+    auto& dxvk = mobiro::gfx::DxvkInterop::global();
+    auto& com = mobiro::gfx::D3D11ComBridge::global();
+    dxvk.set_target_fps(60);
+    mobiro::gfx::DxvkBackendTable mock_tbl{};
+    mock_tbl.d3d11_create_device_and_swap_chain =
+        +[](void*, uint32_t, void*, uint32_t, const uint32_t*, uint32_t, uint32_t,
+            const void*, void** out_sc, void** out_dev, uint32_t* out_fl, void** out_ctx) -> int32_t {
+            if (out_sc)  *out_sc  = &g_sc;
+            if (out_dev) *out_dev = &g_dev;
+            if (out_fl)  *out_fl  = 0xb000u;
+            if (out_ctx) *out_ctx = &g_ctx;
+            return 0;
+        };
+    dxvk.set_backend_override(mock_tbl, true);
+
+    mobiro::input::TouchController touch_ctrl;
+    touch_ctrl.set_viewport(1280.0f, 720.0f);
+    mobiro::gfx::TouchOverlayVk touch_vk;
+    touch_vk.set_enabled(true);
+
+    // Simulate player tapping L1 (Deflect) on touchscreen -> feeds InputRouter -> XInputGetState
+    const auto quads = touch_ctrl.build_hud_quads();
+    assert(!quads.empty());
+    touch_ctrl.on_pointer(1, mobiro::input::TouchAction::Down,
+                          (quads[0].x0 + quads[0].x1) * 0.5f * 1280.0f,
+                          (quads[0].y0 + quads[0].y1) * 0.5f * 720.0f,
+                          mobiro::input::InputRouter::global());
+
+    const uint64_t before_frames = dxvk.pacing_stats().frames_presented;
+    com.set_present_hook([&](void*, uint32_t, uint32_t) {
+        touch_vk.pack_quads(touch_ctrl.build_hud_quads());
+        (void)dxvk.pace_present();
+    });
+
+    // 1. D3D11CreateDeviceAndSwapChain -> auto-wrapped COM proxies
+    void *sc_proxy = nullptr, *dev_proxy = nullptr, *ctx_proxy = nullptr;
+    uint32_t got_fl = 0;
+    uint64_t stack_buf[16]{};
+    stack_buf[9]  = reinterpret_cast<uint64_t>(&sc_proxy);
+    stack_buf[10] = reinterpret_cast<uint64_t>(&dev_proxy);
+    stack_buf[11] = reinterpret_cast<uint64_t>(&got_fl);
+    stack_buf[12] = reinterpret_cast<uint64_t>(&ctx_proxy);
+    x64emu_t emu{};
+    emu.rsp = reinterpret_cast<uint64_t>(stack_buf);
+    assert(bridge.invoke_thunk("d3d11.dll", "D3D11CreateDeviceAndSwapChain", &emu) && emu.rax == 0);
+    assert(sc_proxy && dev_proxy && ctx_proxy && got_fl == 0xb000u);
+
+    // 2. IDXGISwapChain::GetBuffer(0, ...) -> auto-wrapped backbuffer -> ID3D11Device::CreateRenderTargetView
+    void* bb_proxy = nullptr;
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>(sc_proxy); emu.rdx = 0; emu.r9 = reinterpret_cast<uint64_t>(&bb_proxy);
+    mobiro::gfx::D3D11ComBridge::dispatch_slot<9>(&emu);
+    assert(emu.rax == 0 && bb_proxy && com.unwrap_arg(reinterpret_cast<uint64_t>(bb_proxy)) == reinterpret_cast<uintptr_t>(&g_bb));
+
+    void* rtv_proxy = nullptr;
+    emu = {}; emu.rcx = reinterpret_cast<uint64_t>(dev_proxy); emu.rdx = reinterpret_cast<uint64_t>(bb_proxy);
+    emu.r9 = reinterpret_cast<uint64_t>(&rtv_proxy);
+    mobiro::gfx::D3D11ComBridge::dispatch_slot<9>(&emu);
+    assert(emu.rax == 0 && rtv_proxy && com.unwrap_arg(reinterpret_cast<uint64_t>(rtv_proxy)) == reinterpret_cast<uintptr_t>(&g_rtv));
+
+    // 3. XInputGetState reads live touch input + 3-frame render loop (OMSetRenderTargets + ClearRenderTargetView + Present)
+    mobiro::input::XInputState pad{};
+    emu = {}; emu.rcx = 0; emu.rdx = reinterpret_cast<uint64_t>(&pad);
+    assert(bridge.invoke_thunk("xinput1_3.dll", "XInputGetState", &emu) && emu.rax == 0);
+    assert(pad.Gamepad.wButtons != 0);
+
+    for (int f = 0; f < 3; ++f) {
+        void* rtvs[1] = {rtv_proxy};
+        emu = {}; emu.rcx = reinterpret_cast<uint64_t>(ctx_proxy); emu.rdx = 1;
+        emu.r8 = reinterpret_cast<uint64_t>(rtvs); emu.r9 = 0;
+        mobiro::gfx::D3D11ComBridge::dispatch_slot<33>(&emu);
+
+        const float rgba[4] = {0.1f * (f + 1), 0.85f, 0.45f, 1.0f};
+        emu = {}; emu.rcx = reinterpret_cast<uint64_t>(ctx_proxy); emu.rdx = reinterpret_cast<uint64_t>(rtv_proxy);
+        emu.r8 = reinterpret_cast<uint64_t>(rgba);
+        mobiro::gfx::D3D11ComBridge::dispatch_slot<50>(&emu);
+
+        emu = {}; emu.rcx = reinterpret_cast<uint64_t>(sc_proxy); emu.rdx = 1; emu.r8 = 0;
+        mobiro::gfx::D3D11ComBridge::dispatch_slot<8>(&emu);
+        assert(emu.rax == 0);
+    }
+
+    assert(g_presents == 3);
+    assert(g_om_bound_rtv == &g_rtv);
+    assert(g_cleared_rgba[1] > 0.8f);
+    assert(dxvk.pacing_stats().frames_presented >= before_frames + 3);
+    assert(!touch_vk.vertices().empty());
+
+    // 4. Clean Release teardown & reset mocks
+    for (void* p : {rtv_proxy, bb_proxy, ctx_proxy, dev_proxy, sc_proxy}) {
+        emu = {}; emu.rcx = reinterpret_cast<uint64_t>(p);
+        mobiro::gfx::D3D11ComBridge::dispatch_slot<2>(&emu);
+    }
+    com.set_present_hook(nullptr);
+    dxvk.set_backend_override({}, false);
+    touch_ctrl.on_pointer(1, mobiro::input::TouchAction::Cancel, 0.0f, 0.0f, mobiro::input::InputRouter::global());
+    bridge.shutdown();
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -2291,6 +2578,29 @@ int main(int argc, char** argv) {
         ff.write(reinterpret_cast<const char*>(mobiro::gfx::spirv::kHudFragSpv),
                  sizeof(mobiro::gfx::spirv::kHudFragSpv));
         return 0;
+    }
+    if (argc == 3 && std::strcmp(argv[1], "--verify-pe") == 0) {
+        mobiro::validator::VfsMapper vfs;
+        vfs.index_root(fs::path(argv[2]).parent_path().string());
+        mobiro::mem::GuestArena arena;
+        if (!arena.reserve(0x0000000100000000ULL, 256ULL * 1024 * 1024)) {
+            std::cerr << "GuestArena reserve failed\n";
+            return 2;
+        }
+        mobiro::cpu::Box64Bridge bridge;
+        if (!bridge.initialize(&arena, &vfs)) {
+            std::cerr << "Box64Bridge init failed\n";
+            return 3;
+        }
+        auto pe = mobiro::cpu::PeLoader::load_pe64(argv[2], arena, bridge);
+        std::cout << "PE OK=" << (pe.ok ? 1 : 0)
+                  << " base=0x" << std::hex << pe.mapped_base << std::dec
+                  << " relocs=" << pe.relocations_applied
+                  << " iat_resolved=" << pe.imports_resolved
+                  << " iat_unresolved=" << pe.unresolved_imports.size() << "\n";
+        for (const auto& u : pe.unresolved_imports) std::cout << "  UNRESOLVED: " << u << "\n";
+        bridge.shutdown();
+        return (pe.ok && pe.unresolved_imports.empty()) ? 0 : 4;
     }
     if (argc == 3 && std::strcmp(argv[1], "--verify-byof") == 0) {
         mobiro::validator::VfsMapper vfs;
@@ -2344,6 +2654,8 @@ int main(int argc, char** argv) {
     test_m17_xaudio2_onebridge_ring_and_gourd_touch();
     test_m18_winmm_waveout_xinput_ordinals_and_sekiro_compat();
     test_m19_win64_static_tls_pointer_isolation();
+    test_m21_vfs_prefix_crt_file_mapping_and_ntdll();
+    test_m22_end_to_end_d3d11_xaudio_xinput_60fps_selftest();
     std::cout << "All Mobiro core unit tests passed.\n";
     return 0;
 }
