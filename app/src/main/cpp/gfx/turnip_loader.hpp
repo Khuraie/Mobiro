@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 
 #if defined(__linux__) || defined(__ANDROID__)
@@ -43,11 +44,47 @@ inline VulkanDriverHandle load_vulkan_driver(const std::string& native_lib_dir) 
     if (h) {
         auto* fn = reinterpret_cast<PfnGetInstanceProcAddr>(dlsym(h, "vk_icdGetInstanceProcAddr"));
         if (!fn) fn = reinterpret_cast<PfnGetInstanceProcAddr>(dlsym(h, "vkGetInstanceProcAddr"));
+        if (!fn) {
+            // Android Mesa Turnip builds export the Android Vulkan HAL module symbol `HMI`
+            // (hwvulkan_module_t) whose methods->open(hmi, "vk0", &dev) returns GetInstanceProcAddr.
+            struct HwModuleMethods {
+                int (*open)(const void* module, const char* id, void** device);
+            };
+            struct HwModule {
+                uint32_t tag;
+                uint16_t module_api_version;
+                uint16_t hal_api_version;
+                const char* id;
+                const char* name;
+                const char* author;
+                const HwModuleMethods* methods;
+            };
+            struct HwVulkanDevice {
+                uint32_t tag;
+                uint32_t version;
+                void* module;
+                uint64_t reserved[12];
+                int (*close)(void* device);
+                void* enumerate_instance_extension_properties;
+                void* create_instance;
+                PfnGetInstanceProcAddr get_instance_proc_addr;
+            };
+            if (auto* hmi = reinterpret_cast<const HwModule*>(dlsym(h, "HMI"));
+                hmi && hmi->methods && hmi->methods->open) {
+                void* dev = nullptr;
+                if (hmi->methods->open(hmi, "vk0", &dev) == 0 && dev) {
+                    auto* vk_dev = reinterpret_cast<HwVulkanDevice*>(dev);
+                    fn = vk_dev->get_instance_proc_addr;
+                    if (vk_dev->close) vk_dev->close(dev);
+                }
+            }
+        }
         if (fn) {
             res.dl_handle = h;
             res.get_instance_proc_addr = fn;
             res.using_turnip = true;
             res.loaded_path = used_path;
+            res.turnip_error.clear();
             return res;
         }
         dlclose(h);

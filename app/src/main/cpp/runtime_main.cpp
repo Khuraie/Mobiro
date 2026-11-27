@@ -310,10 +310,14 @@ Java_com_mobiro_runtime_MainActivity_nativeConfigureAndValidate(
         setenv("BOX64_SHOWBT", "1", 1);
         setenv("BOX64_SHOWSEGV", "1", 1);
         setenv("MOBIRO_API_TRACE_FILE", api_log.c_str(), 1);
+        setenv("DXVK_LOG_PATH", parent_dir.string().c_str(), 1);
+        setenv("DXVK_LOG_LEVEL", "debug", 1);
     } else {
         setenv("BOX64_LOG", "0", 1);
         unsetenv("BOX64_TRACE_FILE");
         unsetenv("MOBIRO_API_TRACE_FILE");
+        setenv("DXVK_LOG_LEVEL", "none", 1);
+        unsetenv("DXVK_LOG_PATH");
     }
 
     // 4. Load Mesa Turnip ICD (with graceful fallback to system Vulkan) + native AArch64 DXVK
